@@ -1,20 +1,13 @@
 /**
- * Watchlist — 自选股管理组件
- *
- * 支持：
- *   - 从 chrome.storage.local 读取/写入自选股列表
- *   - 添加股票（从输入区域）
- *   - 删除股票
- *   - 快捷分析单只自选股
- *   - 折叠/展开面板
+ * Watchlist — 自选股管理组件 (Electron 版)
+ * 使用 Electron IPC store 替换 chrome.storage.local
  *
  * @module sidepanel/components/Watchlist
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import type { ChromeMessage, ChromeResponse } from '../../utils/types';
-import type { AnalysisResult } from '../../utils/types';
+import { sendMessage } from '../../src/shared/ipc-bridge';
 
 // ═══════════════════════════════════════════════════════════════
 // 自选股条目接口
@@ -27,40 +20,34 @@ export interface WatchlistItem {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Storage 工具函数
+// Storage 工具函数 (Electron IPC)
 // ═══════════════════════════════════════════════════════════════
-
-const STORAGE_KEY = 'xvqiu_watchlist';
 
 async function loadWatchlist(): Promise<WatchlistItem[]> {
   try {
-    const result = await chrome.storage.local.get(STORAGE_KEY);
-    return (result[STORAGE_KEY] as WatchlistItem[]) ?? [];
+    const list = await window.electronAPI.store.getWatchlist();
+    return list ?? [];
   } catch {
     return [];
   }
 }
 
 async function saveWatchlist(list: WatchlistItem[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY]: list });
+  await window.electronAPI.store.setWatchlist(list);
 }
 
 /** 解析用户输入的股票代码/名称 */
 function parseStockInput(input: string): { code: string; name: string } {
   const trimmed = input.trim();
-  // 尝试匹配 "名称 代码" 或 "代码 名称"
   const parts = trimmed.split(/\s+/);
   if (parts.length >= 2) {
-    // 判断第一个是代码还是名称
     const first = parts[0];
     const second = parts[1];
-    // 如果第一个是纯数字（6位以内）或带前缀，视为代码
     if (/^\d{6}$/.test(first) || /^(sh|sz|SH|SZ|bj|BJ)\d{6}$/.test(first)) {
       return { code: first, name: second };
     }
     return { code: second, name: first };
   }
-  // 单一部分 — 判断是代码还是名称
   if (/^\d{6}$/.test(trimmed)) {
     return { code: trimmed, name: trimmed };
   }
@@ -132,14 +119,13 @@ const Watchlist: React.FC = () => {
       setError(null);
 
       try {
-        const message: ChromeMessage = {
+        const response = await sendMessage({
           type: 'ANALYZE_POOL',
           payload: { stocks: [`${item.name} ${item.code}`] },
-        };
-        const response: ChromeResponse = await chrome.runtime.sendMessage(message);
+        });
 
         if (response?.success && response.data) {
-          if (typeof response.data === 'object' && 'marketEnv' in response.data) {
+          if (typeof response.data === 'object' && 'marketEnv' in (response.data as any)) {
             useAppStore.getState().setAnalysisResult(response.data as any);
           } else {
             setStatus('success');
@@ -235,7 +221,6 @@ const Watchlist: React.FC = () => {
                   key={item.code}
                   className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-800/50 transition-colors group"
                 >
-                  {/* 股票信息 */}
                   <div className="flex-1 min-w-0">
                     <span className="text-xs text-gray-300">{item.name}</span>
                     <span className="text-[10px] text-gray-600 ml-1.5 font-mono">
@@ -243,9 +228,7 @@ const Watchlist: React.FC = () => {
                     </span>
                   </div>
 
-                  {/* 操作按钮 */}
                   <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {/* 快捷分析 */}
                     <button
                       type="button"
                       onClick={() => handleQuickAnalyze(item)}
@@ -254,7 +237,6 @@ const Watchlist: React.FC = () => {
                     >
                       分析
                     </button>
-                    {/* 删除 */}
                     <button
                       type="button"
                       onClick={() => handleRemove(item.code)}

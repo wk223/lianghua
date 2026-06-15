@@ -1,7 +1,8 @@
 /**
- * xvqiu 侧边栏全局状态管理
+ * xvqiu 全局状态管理 (Electron 版)
  *
- * 管理：输入、加载状态、分析结果、设置
+ * 移除 chrome.runtime / chrome.storage 依赖
+ * 保留与 Chrome 版完全相同的接口
  *
  * @module sidepanel/stores/useAppStore
  */
@@ -37,49 +38,32 @@ export type ActionType = 'none' | 'env-check' | 'analyze';
 
 interface AppState {
   // ─── 输入 ─────────────────────────────────
-  /** 单只股票输入 */
   singleInput: string;
-  /** 批量股票池输入（多行文本） */
   batchInput: string;
-  /** 当前激活的输入模式 */
   inputMode: 'single' | 'batch';
 
   // ─── 连接状态 ─────────────────────────────
-  /** 是否与 Service Worker 连接 */
   connected: boolean;
 
   // ─── 分析状态 ─────────────────────────────
-  /** 整体分析状态 */
   status: AnalysisStatus;
-  /** 当前执行的操作类型 */
   currentAction: ActionType;
-  /** 错误信息 */
   errorMessage: string | null;
 
   // ─── 流式输出 ────────────────────────────
-  /** 流式文本（LLM 逐字输出） */
   streamingText: string;
-  /** 是否正在进行流式分析 */
   isStreaming: boolean;
 
   // ─── 分析结果 ─────────────────────────────
-  /** 市场环境级别 */
   envLevel: EnvLevel | null;
-  /** 市场情绪描述 */
   envSentiment: string;
-  /** 仓位建议 */
   envSuggestion: string;
-  /** L2 方向判断结果列表 */
   directions: DirectionResult[];
-  /** 个股分析结果列表 */
   stockResults: StockResult[];
-  /** 原始完整分析结果（用于调试/历史） */
   rawResult: AnalysisResult | null;
 
   // ─── 设置 ─────────────────────────────────
-  /** API Key 是否已配置 */
   hasApiKey: boolean;
-  /** 设置面板是否展开 */
   settingsOpen: boolean;
 
   // ─── 操作 ─────────────────────────────────
@@ -158,7 +142,7 @@ const initialStates: Pick<
   directions: [],
   stockResults: [],
   rawResult: null,
-  hasApiKey: false,
+  hasApiKey: true, // Electron 版内置 API Key
   settingsOpen: false,
 };
 

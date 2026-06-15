@@ -4,31 +4,31 @@
   "description": "A股短线交易决策助手 — 四层过滤，帮你少做垃圾机会",
   "private": true,
   "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite build --watch --mode development",
-    "build": "tsc --noEmit && vite build",
+    "dev": "vite",
+    "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext .ts,.tsx",
-    "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist .crx"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"const fs=require('fs');['dist','dist-electron'].forEach(d=>fs.rmSync(d,{recursive:true,force:true}))\""
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "zustand": "^4.5.4"
+    "zustand": "^4.5.7"
   },
   "devDependencies": {
-    "@crxjs/vite-plugin": "^2.0.1",
-    "@types/chrome": "^0.0.268",
+    "@types/node": "^25.9.3",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
-    "autoprefixer": "^10.4.19",
-    "eslint": "^8.57.0",
-    "eslint-plugin-react-hooks": "^4.6.2",
-    "postcss": "^8.4.39",
-    "tailwindcss": "^3.4.6",
-    "typescript": "^5.5.3",
-    "vite": "^5.3.4"
+    "autoprefixer": "^10.5.0",
+    "electron": "^42.4.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^6.0.3",
+    "vite": "^5.4.0",
+    "vite-plugin-electron": "^1.0.4",
+    "vite-plugin-electron-renderer": "^1.0.0"
   }
 }

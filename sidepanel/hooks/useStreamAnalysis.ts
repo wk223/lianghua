@@ -1,19 +1,13 @@
 /**
- * 流式分析 Hook
- * 通过 chrome.runtime.connect 长连接接收流式分析结果
+ * 流式分析 Hook (Electron 版)
+ * 通过 Electron IPC 接收流式分析事件
  *
- * 用法:
- * ```ts
- * const { startStream, abortStream, streamingText, isStreaming } = useStreamAnalysis();
- *
- * // 开始流式分析
- * await startStream('ANALYZE_POOL_STREAM', { stocks: ['000001', '600519'] });
- * ```
+ * 替换 chrome.runtime.connect 为 Electron IPC (ipcRenderer.on 'stream:event')
  *
  * @module sidepanel/hooks/useStreamAnalysis
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   StreamEvent,
   StreamProgress,
@@ -23,6 +17,7 @@ import type {
   DirectionResult,
 } from '../../utils/types';
 import { useAppStore, type StockResult } from '../stores/useAppStore';
+import { onStreamEvent, startStream } from '../../src/shared/ipc-bridge';
 
 // ═══════════════════════════════════════════════════════════════
 // 钩子
@@ -30,9 +25,21 @@ import { useAppStore, type StockResult } from '../stores/useAppStore';
 
 export function useStreamAnalysis() {
   const store = useAppStore();
-  const portRef = useRef<chrome.runtime.Port | null>(null);
   const [streamingText, setStreamingText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const resolveRef = useRef<((value: void | PromiseLike<void>) => void) | null>(null);
+  const rejectRef = useRef<((reason?: unknown) => void) | null>(null);
+
+  // 组件卸载时清理监听
+  useEffect(() => {
+    return () => {
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
+      }
+    };
+  }, []);
 
   /**
    * 开始流式分析
@@ -40,14 +47,15 @@ export function useStreamAnalysis() {
    * @param type  - 消息类型 (ANALYZE_POOL_STREAM | ANALYZE_SINGLE_STREAM)
    * @param payload - 请求参数
    */
-  const startStream = useCallback(
+  const startStreamAnalysis = useCallback(
     async (
       type: 'ANALYZE_POOL_STREAM' | 'ANALYZE_SINGLE_STREAM',
       payload: unknown,
     ): Promise<void> => {
-      // 关闭旧的连接
-      if (portRef.current) {
-        portRef.current.disconnect();
+      // 清理旧监听
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
       }
 
       setIsStreaming(true);
@@ -55,12 +63,12 @@ export function useStreamAnalysis() {
       store.clearResults();
       store.setStatus('loading');
 
-      // 创建长连接
-      const port = chrome.runtime.connect({ name: 'xvqiu-stream' });
-      portRef.current = port;
-
       return new Promise<void>((resolve, reject) => {
-        port.onMessage.addListener((event: StreamEvent) => {
+        resolveRef.current = resolve;
+        rejectRef.current = reject;
+
+        // 注册流式事件监听
+        unsubscribeRef.current = onStreamEvent((event: StreamEvent) => {
           try {
             switch (event.event) {
               // ── LLM 流式文本 ──
@@ -73,10 +81,7 @@ export function useStreamAnalysis() {
               // ── 进度更新 ──
               case 'stream:progress': {
                 const progress = event.data as StreamProgress;
-                // 进度信息展示在 loading 状态中
-                store.setCurrentAction(
-                  progress.stage === 'llm' ? 'analyze' : 'analyze',
-                );
+                store.setCurrentAction('analyze');
                 break;
               }
 
@@ -109,7 +114,6 @@ export function useStreamAnalysis() {
                   riskPoints: conclusion.riskPoints,
                   priority: conclusion.priority,
                 };
-                // 追加到当前结果列表
                 const current = useAppStore.getState().stockResults;
                 useAppStore.getState().setStockResults([
                   ...current,
@@ -153,24 +157,8 @@ export function useStreamAnalysis() {
           }
         });
 
-        port.onDisconnect.addListener(() => {
-          // Chrome 断开连接（可能是 SW 休眠）
-          if (portRef.current === port) {
-            portRef.current = null;
-            if (isStreaming) {
-              store.setError('连接断开，分析可能未完成');
-              setIsStreaming(false);
-              reject(new Error('连接断开'));
-            }
-          }
-        });
-
-        // 发送请求
-        port.postMessage({
-          type,
-          payload,
-          requestId: crypto.randomUUID?.() ?? Date.now().toString(),
-        });
+        // 发送请求启动流式分析
+        startStream(type, payload);
       });
     },
     [store],
@@ -180,12 +168,9 @@ export function useStreamAnalysis() {
    * 中止流式分析
    */
   const abortStream = useCallback(() => {
-    if (portRef.current) {
-      portRef.current.postMessage({
-        event: 'stream:abort',
-      } satisfies StreamEvent);
-      portRef.current.disconnect();
-      portRef.current = null;
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
     }
     setIsStreaming(false);
     store.setStatus('idle');
@@ -193,7 +178,7 @@ export function useStreamAnalysis() {
   }, [store]);
 
   return {
-    startStream,
+    startStream: startStreamAnalysis,
     abortStream,
     streamingText,
     isStreaming,

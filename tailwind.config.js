@@ -2,22 +2,22 @@
 export default {
   content: [
     './sidepanel/**/*.{ts,tsx,html}',
-    './content/**/*.{ts,tsx}',
+    './src/**/*.{ts,tsx,html}',
   ],
   theme: {
     extend: {
       colors: {
         // 四类结论颜色
-        'buy': '#22c55e',       // 🟢 可直接买
-        'cond-buy': '#eab308',  // 🟡 条件买
-        'watch': '#f97316',     // 🟠 观察
-        'no-buy': '#ef4444',    // 🔴 不买
+        'buy': '#22c55e',
+        'cond-buy': '#eab308',
+        'watch': '#f97316',
+        'no-buy': '#ef4444',
         // 市场环境级别
-        'env-s': '#22c55e',     // S 级
-        'env-a': '#16a34a',     // A 级
-        'env-b': '#eab308',     // B 级
-        'env-c': '#f97316',     // C 级
-        'env-d': '#ef4444',     // D 级
+        'env-s': '#22c55e',
+        'env-a': '#16a34a',
+        'env-b': '#eab308',
+        'env-c': '#f97316',
+        'env-d': '#ef4444',
       },
       fontFamily: {
         sans: [

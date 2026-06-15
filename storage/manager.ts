@@ -1,42 +1,9 @@
 /**
- * Chrome Storage 管理器
- * 类型安全的 storage.local + storage.sync 封装
+ * Storage 管理器
+ * 兼容 Chrome Extension 与 Electron 环境的存储封装
  *
- * ─── 存储策略 ──────────────────────────────────────
- *
- * chrome.storage.sync（跨设备同步，有配额限制）:
- *   - api_key    : DeepSeek API Key（字符串，~64 字符）
- *   - settings   : 用户偏好设置（对象，体积小）
- *
- *   注: sync 的 QUOTA_BYTES_PER_ITEM = 8,192 字节 (≈8KB)
- *       QUOTA_BYTES = 102,400 字节 (≈100KB)
- *       每项必须 <8KB，总计 <100KB
- *
- * chrome.storage.local（本机存储，配额大）:
- *   - watchlist  : 自选股列表（字符串数组）
- *   - history    : 分析历史记录（数组，含完整结果）
- *   - cache_*    : 数据缓存（TTL 过期机制）
- *   - meta_*     : 内部元数据（版本号、安装时间等）
- *
- * ─── 用法示例 ─────────────────────────────────────
- *
- * ```ts
- * const storage = new StorageManager();
- *
- * // 读取设置（自动走 sync）
- * const settings = await storage.get('settings');
- *
- * // 写入 API Key（自动走 sync）
- * await storage.set('api_key', 'sk-xxx...');
- *
- * // 操作缓存
- * await storage.setCache('sectors', sectorData, 60_000);
- * const cached = await storage.getCache<MyType>('sectors');
- *
- * // 记录分析历史
- * await storage.addHistory(analysisResult);
- * const recent = await storage.getHistory({ limit: 10 });
- * ```
+ * Chrome 环境: 使用 chrome.storage.local + chrome.storage.sync
+ * Electron 环境: 使用内存 Map 回退（运行时会在 main process 中通过 IPC 持久化）
  *
  * @module storage/manager
  */
@@ -203,6 +170,12 @@ export class StorageManager {
 
   /** 内存缓存，避免频繁读取 Chrome Storage */
   private memoryCache = new Map<string, unknown>();
+
+  /** 内存回退存储（Electron 环境，模拟 chrome.storage.sync） */
+  private memorySync = new Map<string, unknown>();
+
+  /** 内存回退存储（Electron 环境，模拟 chrome.storage.local） */
+  private memoryLocal = new Map<string, unknown>();
 
   /** 是否已初始化 */
   private initialized = false;
@@ -1118,14 +1091,65 @@ export class StorageManager {
   // ═══════════════════════════════════════════════
 
   /**
-   * 获取 Chrome Storage 对象
+   * 获取存储对象
+   * Chrome 环境 → chrome.storage
+   * Electron/其他环境 → 内存回退
    */
   private getChromeStorage(area: 'sync' | 'local'): chrome.storage.StorageArea {
-    if (typeof chrome === 'undefined' || !chrome.storage) {
-      throw new StorageError('Chrome Storage API 不可用', 'API_UNAVAILABLE');
+    if (typeof chrome !== 'undefined' && chrome.storage) {
+      return area === 'sync' ? chrome.storage.sync : chrome.storage.local;
     }
 
-    return area === 'sync' ? chrome.storage.sync : chrome.storage.local;
+    // Electron/Node 环境 → 使用内存回退
+    return this.getMemoryFallback(area);
+  }
+
+  /**
+   * 创建内存回退 StorageArea（用于 Electron 环境）
+   */
+  private getMemoryFallback(_area: 'sync' | 'local'): chrome.storage.StorageArea {
+    // 每个区域一个独立的内存 Map
+    const store = _area === 'sync' ? this.memorySync : this.memoryLocal;
+
+    return {
+      get: async (keys: string | string[] | Record<string, unknown> | null) => {
+        if (keys === null) {
+          const result: Record<string, unknown> = {};
+          store.forEach((v, k) => { result[k] = v; });
+          return result;
+        }
+        if (typeof keys === 'string') {
+          return { [keys]: store.get(keys) };
+        }
+        if (Array.isArray(keys)) {
+          const result: Record<string, unknown> = {};
+          for (const key of keys) result[key] = store.get(key);
+          return result;
+        }
+        // Object form (defaults)
+        const result: Record<string, unknown> = {};
+        for (const [key, defaultValue] of Object.entries(keys)) {
+          result[key] = store.has(key) ? store.get(key) : defaultValue;
+        }
+        return result;
+      },
+      set: async (items: Record<string, unknown>) => {
+        for (const [key, value] of Object.entries(items)) {
+          store.set(key, value);
+        }
+      },
+      remove: async (keys: string | string[]) => {
+        const keyList = Array.isArray(keys) ? keys : [keys];
+        for (const key of keyList) store.delete(key);
+      },
+      clear: async () => store.clear(),
+      getBytesInUse: async () => 0,
+      onChanged: {
+        addListener: () => {},
+        removeListener: () => {},
+        hasListener: () => false,
+      } as any,
+    } as unknown as chrome.storage.StorageArea;
   }
 
   /**

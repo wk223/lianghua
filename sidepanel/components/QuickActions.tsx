@@ -1,15 +1,13 @@
 /**
- * QuickActions — 快捷操作按钮
- *
- * 提供：环境检查、一键分析两个核心操作
- * 根据当前状态禁用/展示加载中
+ * QuickActions — 快捷操作按钮 (Electron 版)
+ * 使用 IPC invoke 替换 chrome.runtime.sendMessage
  *
  * @module sidepanel/components/QuickActions
  */
 
 import React, { useCallback } from 'react';
-import { useAppStore, type StockResult } from '../stores/useAppStore';
-import type { ChromeMessage, ChromeResponse } from '../../utils/types';
+import { useAppStore } from '../stores/useAppStore';
+import { sendMessage } from '../../src/shared/ipc-bridge';
 
 const QuickActions: React.FC = () => {
   const {
@@ -22,8 +20,6 @@ const QuickActions: React.FC = () => {
     setCurrentAction,
     setError,
     setEnvResult,
-    setHasApiKey,
-    hasApiKey,
   } = useAppStore();
 
   const isLoading = status === 'loading';
@@ -36,18 +32,17 @@ const QuickActions: React.FC = () => {
     setError(null);
 
     try {
-      const message: ChromeMessage = { type: 'ENV_CHECK' };
-      const response: ChromeResponse = await chrome.runtime.sendMessage(message);
+      const response = await sendMessage({ type: 'ENV_CHECK' });
 
       if (response?.success && response.data) {
+        const data = response.data as any;
         setEnvResult(
-          response.data.envLevel,
-          response.data.sentiment,
-          response.data.suggestion,
+          data.envLevel,
+          data.sentiment,
+          data.suggestion,
         );
-        // 同时设置方向结果（如果有）
-        if (response.data.directions?.length > 0) {
-          useAppStore.getState().setDirections(response.data.directions);
+        if (data.directions?.length > 0) {
+          useAppStore.getState().setDirections(data.directions);
         }
         setStatus('success');
       } else {
@@ -80,16 +75,13 @@ const QuickActions: React.FC = () => {
         .map((l) => l.trim())
         .filter((l) => l.length > 0);
 
-      const message: ChromeMessage = {
+      const response = await sendMessage({
         type: 'ANALYZE_POOL',
         payload: { stocks: lines },
-      };
-
-      const response: ChromeResponse = await chrome.runtime.sendMessage(message);
+      });
 
       if (response?.success && response.data) {
-        // 使用 setAnalysisResult 设置完整分析结果
-        if (typeof response.data === 'object' && 'marketEnv' in response.data) {
+        if (typeof response.data === 'object' && 'marketEnv' in (response.data as any)) {
           useAppStore.getState().setAnalysisResult(response.data as any);
         } else {
           setStatus('success');

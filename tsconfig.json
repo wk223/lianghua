@@ -15,21 +15,20 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@shared/*": ["src/shared/*"]
     }
   },
   "include": [
-    "manifest.json",
-    "service-worker.ts",
     "sidepanel/**/*.ts",
     "sidepanel/**/*.tsx",
-    "content/**/*.ts",
     "engine/**/*.ts",
     "llm/**/*.ts",
     "data/**/*.ts",
     "storage/**/*.ts",
     "prompts/**/*.ts",
-    "utils/**/*.ts"
+    "utils/**/*.ts",
+    "src/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist", ".crx"]
+  "exclude": ["node_modules", "dist", "dist-electron", ".crx", "electron"]
 }

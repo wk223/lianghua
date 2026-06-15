@@ -1,15 +1,14 @@
 /**
- * xvqiu 主应用组件
- * Side Panel 根组件 — 输入 + 展示布局
- *
- * 组合所有子组件，管理整体布局
+ * xvqiu 主应用组件 (Electron 版)
+ * 替换 chrome.runtime.sendMessage 为 IPC invoke
+ * 移除 chrome.storage 依赖
  *
  * @module sidepanel/App
  */
 
 import React, { useEffect } from 'react';
-import type { ChromeResponse } from '../utils/types';
 import { useAppStore } from './stores/useAppStore';
+import { sendMessage } from '../src/shared/ipc-bridge';
 
 // 子组件
 import StockInput from './components/StockInput';
@@ -30,26 +29,19 @@ const App: React.FC = () => {
     envLevel,
     stockResults,
     hasApiKey,
-    setHasApiKey,
   } = useAppStore();
 
-  // 启动时检测与 Service Worker 的连接 & 检查 API Key
+  // 启动时检测与主进程的连接
   useEffect(() => {
-    // 连接检查
-    chrome.runtime.sendMessage({ type: 'PING' }, (response: ChromeResponse) => {
+    sendMessage({ type: 'PING' }).then((response) => {
       if (response?.success) {
         setConnected(true);
-        console.log('[xvqiu] Side Panel 已连接 Service Worker');
+        console.log('[xvqiu] 已连接 Electron 主进程');
       } else {
-        console.warn('[xvqiu] 连接 Service Worker 失败');
+        console.warn('[xvqiu] 连接主进程失败');
       }
     });
-
-    // 检查 API Key 是否已配置
-    chrome.storage.sync.get('api_key').then((result) => {
-      setHasApiKey((result.api_key as string)?.length > 0);
-    });
-  }, [setConnected, setHasApiKey]);
+  }, [setConnected]);
 
   // ─── 判断展示区域内容 ──────────────────
 
@@ -113,7 +105,7 @@ const App: React.FC = () => {
 
         {/* 右侧状态 */}
         <div className="ml-auto flex items-center gap-3">
-          {/* API Key 状态 */}
+          {/* 设置 */}
           <SettingsPanel />
 
           {/* 连接状态灯 */}
@@ -122,7 +114,7 @@ const App: React.FC = () => {
               className={`w-2 h-2 rounded-full ${
                 connected ? 'bg-green-500' : 'bg-red-500'
               }`}
-              title={connected ? 'Service Worker 已连接' : 'Service Worker 未连接'}
+              title={connected ? '主进程已连接' : '主进程未连接'}
             />
             <span className="text-[10px] text-gray-600 hidden sm:inline">
               {connected ? '已连接' : '断开'}
@@ -142,7 +134,7 @@ const App: React.FC = () => {
         {/* 自选股管理 */}
         <Watchlist />
 
-        {/* 错误提示（在结果区上方） */}
+        {/* 错误提示 */}
         {status === 'error' && <ErrorState />}
 
         {/* 结果内容区 */}

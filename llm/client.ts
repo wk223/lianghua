@@ -1,8 +1,6 @@
 /**
- * DeepSeek API 客户端
- * API Key 管理、非流式/流式 chat completion、超时控制、错误重试
- *
- * 兼容 OpenAI SDK 请求格式，endpoint: https://api.deepseek.com/v1/chat/completions
+ * DeepSeek API 客户端 (Electron 版)
+ * API Key 硬编码在代码中，不再使用 chrome.storage
  *
  * @module llm/client
  */
@@ -27,45 +25,36 @@ import { SYSTEM_PROMPT } from '../prompts/system-prompt';
 import { withRetry } from '../utils/retry';
 import { logger } from '../utils/logger';
 
-// ─── Chrome Storage Key ───────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// DeepSeek API Key (硬编码)
+//
+// ⚠️ 安全提示:
+//   这只是演示/内部构建。生产环境应通过环境变量或安全配置服务注入。
+//   在 Electron 构建中，编译后的 main.js 中仍可见此 Key。
+//   建议在正式发布前使用 .env 文件并通过 `electron-vite` 注入。
+// ═══════════════════════════════════════════════════════════════
 
-/** Storage 中保存 API Key 的键名 */
-const STORAGE_KEY_API_KEY = 'deepseek_api_key';
+const HARDCODED_API_KEY = 'sk-demo-internal-key';
 
-// ─── Storage API Key 管理器 ───────────────────────────
+// ─── API Key 管理器 (Electron 版) ─────────────────────
 
-/**
- * API Key 管理器
- * 从 Chrome Storage 读取 Key（带缓存），也支持显式设置/清除
- *
- * Storage 路径: chrome.storage.local['deepseek_api_key']
- */
 export class StorageKeyManager {
   private cachedKey: string | null = null;
 
   /**
    * 获取 API Key
-   * 优先级: 1) 构造函数传入 2) Chrome Storage 3) 环境变量 fallback
+   * 优先级: 1) 构造函数传入 2) 硬编码 Key 3) 环境变量 fallback
    */
   async getKey(): Promise<string> {
-    // 内存缓存
     if (this.cachedKey) return this.cachedKey;
 
-    // Chrome Extension 环境 — 从 chrome.storage.local 读取
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      try {
-        const result = await chrome.storage.local.get(STORAGE_KEY_API_KEY);
-        const key = result[STORAGE_KEY_API_KEY] as string | undefined;
-        if (key && key.trim()) {
-          this.cachedKey = key.trim();
-          return this.cachedKey;
-        }
-      } catch (err) {
-        logger.warn('[KeyManager] 读取 Chrome Storage 失败:', err);
-      }
+    // 硬编码 Key
+    if (HARDCODED_API_KEY && HARDCODED_API_KEY !== 'sk-demo-internal-key') {
+      this.cachedKey = HARDCODED_API_KEY;
+      return this.cachedKey;
     }
 
-    // 开发环境 fallback — 通过 globalThis 获取环境变量（兼容 Node/无 Node）
+    // Electron 环境 → 环境变量
     try {
       const env = (globalThis as any)?.process?.env;
       const envKey: string | undefined = env?.DEEPSEEK_API_KEY;
@@ -77,33 +66,22 @@ export class StorageKeyManager {
       // 非 Node 环境忽略
     }
 
-    throw new AuthError('API Key 未配置。请在扩展设置中填入 DeepSeek API Key。');
+    throw new AuthError('API Key 未配置。请在环境变量 DEEPSEEK_API_KEY 中设置，或更新 llm/client.ts 中的 HARDCODED_API_KEY。');
   }
 
-  /** 设置 API Key（写入 Chrome Storage + 内存缓存） */
+  /** 设置 API Key */
   async setKey(key: string): Promise<void> {
     const trimmed = key.trim();
     if (!trimmed) {
       throw new AuthError('API Key 不能为空');
     }
-
     this.cachedKey = trimmed;
-
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      await chrome.storage.local.set({ [STORAGE_KEY_API_KEY]: trimmed });
-    }
-
     logger.info('[KeyManager] API Key 已更新');
   }
 
-  /** 清除 API Key（从 Storage + 缓存） */
+  /** 清除 API Key */
   async clearKey(): Promise<void> {
     this.cachedKey = null;
-
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      await chrome.storage.local.remove(STORAGE_KEY_API_KEY);
-    }
-
     logger.info('[KeyManager] API Key 已清除');
   }
 
@@ -143,7 +121,7 @@ export class DeepSeekClient {
     this.config = { ...this.config, ...partial };
   }
 
-  /** 获取 KeyManager 引用（用于外部调用 setKey/clearKey） */
+  /** 获取 KeyManager 引用 */
   getKeyManager(): StorageKeyManager {
     return this.keyManager;
   }
@@ -193,7 +171,6 @@ export class DeepSeekClient {
       bodyText = '(无法读取响应体)';
     }
 
-    // 401 —— API Key 问题
     if (status === 401) {
       throw new AuthError(
         bodyText.includes('Incorrect API key')
@@ -202,7 +179,6 @@ export class DeepSeekClient {
       );
     }
 
-    // 429 —— 速率限制
     if (status === 429) {
       const retryAfter = response.headers.get('retry-after-ms')
         ? parseInt(response.headers.get('retry-after-ms')!, 10)
@@ -213,7 +189,6 @@ export class DeepSeekClient {
       throw new RateLimitError(retryAfter);
     }
 
-    // 4xx —— 客户端错误（大部分不可重试）
     if (status >= 400 && status < 500) {
       throw new APIError(
         `请求被拒绝 (${status}): ${bodyText.slice(0, 300)}`,
@@ -222,7 +197,6 @@ export class DeepSeekClient {
       );
     }
 
-    // 5xx —— 服务端错误（可重试）
     if (status >= 500) {
       throw new APIError(
         `DeepSeek 服务端错误 (${status})`,
@@ -231,23 +205,11 @@ export class DeepSeekClient {
       );
     }
 
-    // 其他
     throw new APIError(`HTTP ${status}: ${bodyText.slice(0, 200)}`, status, bodyText);
   }
 
   // ─── 非流式调用 ────────────────────────────────────
 
-  /**
-   * 非流式 Chat Completion
-   *
-   * - 完整 system prompt + user messages
-   * - 超时控制
-   * - 自动重试（可重试错误用指数退避）
-   * - 返回完整 LLMResponse
-   *
-   * @param messages - 用户消息列表
-   * @param options  - 超时/重试/中止选项
-   */
   async chat(
     messages: LLMMessage[],
     options?: RequestOptions,
@@ -264,8 +226,6 @@ export class DeepSeekClient {
 
     const execute = async (): Promise<LLMResponse> => {
       const controller = new AbortController();
-
-      // 合并外部 signal + 超时
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       const combinedSignal = options?.signal
         ? combineSignals(options.signal, controller.signal)
@@ -301,7 +261,6 @@ export class DeepSeekClient {
       } catch (error) {
         if (error instanceof LLMError) throw error;
 
-        // 超时
         if (error instanceof DOMException && error.name === 'AbortError') {
           throw new TimeoutError(timeoutMs);
         }
@@ -315,7 +274,6 @@ export class DeepSeekClient {
       }
     };
 
-    // 使用 withRetry 处理可重试错误
     return withRetry(execute, {
       maxRetries: options?.retries ?? DEFAULT_CONFIG.MAX_RETRIES,
       baseDelay: options?.retryBaseDelay ?? DEFAULT_CONFIG.RETRY_BASE_DELAY,
@@ -328,10 +286,6 @@ export class DeepSeekClient {
     });
   }
 
-  /**
-   * 快速调用 — 只发一条 user 消息，返回 content 字符串
-   * 是 chat() 的便捷包装
-   */
   async ask(
     userMessage: string,
     options?: RequestOptions,
@@ -345,18 +299,6 @@ export class DeepSeekClient {
 
   // ─── 流式调用 ────────────────────────────────────
 
-  /**
-   * 流式 Chat Completion
-   *
-   * - 通过 SSE 实时接收内容片段
-   * - 超时控制 + 外部中止
-   * - 回调通知 onChunk / onDone / onError
-   *
-   * @param messages  - 用户消息列表
-   * @param callbacks - 流回调
-   * @param options   - 超时/重试/中止选项
-   * @returns 汇总 StreamResult
-   */
   async chatStream(
     messages: LLMMessage[],
     callbacks?: StreamCallbacks,
@@ -377,8 +319,6 @@ export class DeepSeekClient {
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    // 合并外部 signal
     const combinedSignal = options?.signal
       ? combineSignals(options.signal, controller.signal)
       : controller.signal;
@@ -401,7 +341,6 @@ export class DeepSeekClient {
         await this.handleResponseError(response);
       }
 
-      // 解析 SSE 流
       return await readStream(
         response,
         {
@@ -440,10 +379,6 @@ export class DeepSeekClient {
     }
   }
 
-  /**
-   * 流式快速调用 — 只发一条 user 消息，通过回调接收内容
-   * 是 chatStream() 的便捷包装
-   */
   async askStream(
     userMessage: string,
     callbacks?: StreamCallbacks,
@@ -459,10 +394,6 @@ export class DeepSeekClient {
 
 // ─── 工具函数 ──────────────────────────────────────────
 
-/**
- * 合并两个 AbortSignal
- * 任意一个 abort 时，返回的 signal 也 abort
- */
 function combineSignals(...signals: AbortSignal[]): AbortSignal {
   const controller = new AbortController();
 
@@ -483,5 +414,4 @@ function combineSignals(...signals: AbortSignal[]): AbortSignal {
 
 // ─── 单例导出 ──────────────────────────────────────────
 
-/** 全局单例客户端 */
 export const deepseekClient = new DeepSeekClient();

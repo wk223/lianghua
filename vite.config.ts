@@ -1,19 +1,29 @@
 import { defineConfig } from 'vite';
-import { crx } from '@crxjs/vite-plugin';
 import react from '@vitejs/plugin-react';
-import manifest from './manifest.json';
+import electron from 'vite-plugin-electron';
+import renderer from 'vite-plugin-electron-renderer';
 
 export default defineConfig({
   plugins: [
     react(),
-    crx({ manifest }),
+    electron([
+      {
+        entry: 'electron/main.ts',
+        onstart(args) {
+          args.startup();
+        },
+      },
+      {
+        entry: 'electron/preload.ts',
+        onstart(args) {
+          args.reload();
+        },
+      },
+    ]),
+    renderer(),
   ],
-  server: {
-    port: 5173,
-    strictPort: true,
-  },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    emptyOutDir: true,
   },
 });
