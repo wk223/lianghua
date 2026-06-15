@@ -10,6 +10,11 @@ export default defineConfig({
       '/api/eastmoney': {
         target: 'https://push2.eastmoney.com',
         changeOrigin: true,
+        secure: false,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://quote.eastmoney.com/',
+        },
         rewrite: (path) => path.replace(/^\/api\/eastmoney/, ''),
       },
     },
