@@ -34,7 +34,7 @@ import { logger } from '../utils/logger';
 //   建议在正式发布前使用 .env 文件并通过 `electron-vite` 注入。
 // ═══════════════════════════════════════════════════════════════
 
-const HARDCODED_API_KEY = 'sk-demo-internal-key';
+const HARDCODED_API_KEY = 'sk-8db314175dba415fb695b03a21cb73b5';
 
 // ─── API Key 管理器 (Electron 版) ─────────────────────
 
@@ -49,7 +49,7 @@ export class StorageKeyManager {
     if (this.cachedKey) return this.cachedKey;
 
     // 硬编码 Key
-    if (HARDCODED_API_KEY && HARDCODED_API_KEY !== 'sk-demo-internal-key') {
+    if (HARDCODED_API_KEY && HARDCODED_API_KEY !== 'sk-8db314175dba415fb695b03a21cb73b5') {
       this.cachedKey = HARDCODED_API_KEY;
       return this.cachedKey;
     }
