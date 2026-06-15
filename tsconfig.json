@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": [
+    "manifest.json",
+    "service-worker.ts",
+    "sidepanel/**/*.ts",
+    "sidepanel/**/*.tsx",
+    "content/**/*.ts",
+    "engine/**/*.ts",
+    "llm/**/*.ts",
+    "data/**/*.ts",
+    "storage/**/*.ts",
+    "prompts/**/*.ts",
+    "utils/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist", ".crx"]
+}
