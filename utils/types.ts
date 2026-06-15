@@ -23,13 +23,50 @@ export interface ChromeResponse<T = any> {
 export type MessageType =
   | 'PING'
   | 'ANALYZE_POOL'
+  | 'ANALYZE_POOL_STREAM'   // 流式股票池分析
   | 'ANALYZE_SINGLE'
+  | 'ANALYZE_SINGLE_STREAM' // 流式单票分析
   | 'ENV_CHECK'
   | 'COMPARE'
   | 'GET_QUOTE'
   | 'GET_MARKET'
   | 'GET_SECTOR'
   | 'ANALYSIS_RESULT';
+
+/** 流式事件类型（通过 Port 推送） */
+export type StreamEventType =
+  | 'stream:chunk'       // LLM 输出片段
+  | 'stream:progress'    // 进度更新（如"L1分析完成"）
+  | 'stream:done'        // 分析完成
+  | 'stream:error'       // 分析错误
+  | 'stream:env-level'   // L1 环境评级结果
+  | 'stream:directions'  // L2 方向结果
+  | 'stream:conclusion'  // 单只股票结论
+  | 'stream:abort';      // 中止信号
+
+/** 流式事件负载 */
+export interface StreamEvent {
+  event: StreamEventType;
+  data?: unknown;
+  requestId?: string;
+}
+
+/** 流式进度更新数据类型 */
+export interface StreamProgress {
+  stage: string;         // 'fetching' | 'l1' | 'l2' | 'l3' | 'llm' | 'l4'
+  message: string;
+  percent: number;       // 0-100
+}
+
+/** 流式结论增量数据 */
+export interface StreamConclusionData {
+  stockCode: string;
+  stockName: string;
+  verdict: Verdict;
+  reason: string;
+  riskPoints: string[];
+  priority: number;
+}
 
 // ─── 股票/市场数据 ────────────────────────────────────
 

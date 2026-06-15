@@ -28,6 +28,8 @@ import type {
 
 import { swLog } from './utils/sw-logger';
 import { EastMoneyAdapter } from './data/eastmoney';
+import { AnalysisEngine } from './engine';
+import type { StreamEvent, StreamProgress } from './utils/types';
 
 // ═══════════════════════════════════════════════════════════════
 // 常量 & 配置
@@ -59,6 +61,7 @@ let lastActiveTime = Date.now();
 // 在 Service Worker 生命周期内复用同一个适配器实例，
 // 共享 DataFetcher 的速率限制器和缓存
 const eastMoney = new EastMoneyAdapter();
+const analysisEngine = new AnalysisEngine();
 
 // ═══════════════════════════════════════════════════════════════
 // 生命周期
@@ -517,8 +520,7 @@ async function initStorageDefaults(): Promise<void> {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * 长期连接 — 用于 Side Panel 持续通信
- * 未来可支持流式推送分析结果
+ * 长期连接 — 用于 Side Panel 持续通信 + 流式分析
  */
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'xvqiu-sidepanel') {
@@ -530,6 +532,161 @@ chrome.runtime.onConnect.addListener((port) => {
 
     port.onDisconnect.addListener(() => {
       swLog.info('Side Panel 已断开');
+    });
+  }
+
+  // ═══ 流式分析连接 ═══
+  if (port.name === 'xvqiu-stream') {
+    swLog.info('流式分析连接已建立');
+
+    /**
+     * 通过 Port 发送流式事件
+     */
+    function sendEvent(event: StreamEvent): void {
+      try {
+        port.postMessage(event);
+      } catch {
+        // 端口已断开，忽略
+      }
+    }
+
+    /**
+     * 发送进度更新
+     */
+    function sendProgress(stage: string, message: string, percent: number): void {
+      const progress: StreamProgress = { stage, message, percent };
+      sendEvent({ event: 'stream:progress', data: progress });
+    }
+
+    port.onMessage.addListener(async (msg: ChromeMessage) => {
+      const { type, payload, requestId } = msg;
+
+      try {
+        if (type === 'ANALYZE_POOL_STREAM') {
+          const stocks: string[] = payload?.stocks ?? [];
+          swLog.info(`流式股票池分析: ${stocks.length} 只`);
+
+          if (stocks.length === 0) {
+            sendEvent({ event: 'stream:error', data: '股票列表为空', requestId });
+            return;
+          }
+
+          sendProgress('fetching', '正在获取市场数据...', 5);
+
+          const result = await analysisEngine.analyzePool({
+            stocks,
+            streamCallbacks: {
+              onChunk: (_chunk, accumulated) => {
+                // 推送 LLM 输出片段
+                sendEvent({
+                  event: 'stream:chunk',
+                  data: _chunk.choices?.[0]?.delta?.content ?? '',
+                  requestId,
+                });
+              },
+            },
+          });
+
+          // L1 环境评级
+          sendEvent({
+            event: 'stream:env-level',
+            data: result.marketEnv,
+            requestId,
+          });
+
+          sendProgress('l4', '正在生成结论...', 90);
+
+          // 逐条推送结论
+          for (const c of result.conclusions) {
+            sendEvent({
+              event: 'stream:conclusion',
+              data: {
+                stockCode: c.stockCode,
+                stockName: c.stockName,
+                verdict: c.verdict,
+                reason: c.reason,
+                riskPoints: c.riskPoints,
+                priority: c.priority,
+              },
+              requestId,
+            });
+          }
+
+          // 完成
+          sendProgress('done', '分析完成', 100);
+          sendEvent({ event: 'stream:done', data: result, requestId });
+          swLog.info(`流式分析完成: ${stocks.length} 只股票`);
+        }
+
+        else if (type === 'ANALYZE_SINGLE_STREAM') {
+          const code: string = payload?.code ?? payload?.stock ?? '';
+          swLog.info(`流式单票分析: ${code}`);
+
+          if (!code) {
+            sendEvent({ event: 'stream:error', data: '请提供股票代码', requestId });
+            return;
+          }
+
+          sendProgress('fetching', '正在获取数据...', 10);
+
+          const result = await analysisEngine.analyzeSingle({
+            code,
+            streamCallbacks: {
+              onChunk: (_chunk, _accumulated) => {
+                sendEvent({
+                  event: 'stream:chunk',
+                  data: _chunk.choices?.[0]?.delta?.content ?? '',
+                  requestId,
+                });
+              },
+            },
+          });
+
+          // 环境评级
+          sendEvent({
+            event: 'stream:env-level',
+            data: result.marketEnv,
+            requestId,
+          });
+
+          // 结论
+          for (const c of result.conclusions) {
+            sendEvent({
+              event: 'stream:conclusion',
+              data: {
+                stockCode: c.stockCode,
+                stockName: c.stockName,
+                verdict: c.verdict,
+                reason: c.reason,
+                riskPoints: c.riskPoints,
+                priority: c.priority,
+              },
+              requestId,
+            });
+          }
+
+          sendEvent({ event: 'stream:done', data: result, requestId });
+          swLog.info(`流式单票分析完成: ${code}`);
+        }
+
+        else if ((msg as any).event === 'stream:abort') {
+          swLog.info('流式分析被用户中止');
+          port.disconnect();
+        }
+
+        else {
+          swLog.warn('未知的流式消息类型:', type);
+          sendEvent({ event: 'stream:error', data: `未知类型: ${type}`, requestId });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        swLog.error('流式分析错误:', errMsg);
+        sendEvent({ event: 'stream:error', data: errMsg, requestId });
+      }
+    });
+
+    port.onDisconnect.addListener(() => {
+      swLog.info('流式分析连接已断开');
     });
   }
 });

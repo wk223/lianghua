@@ -56,6 +56,12 @@ interface AppState {
   /** 错误信息 */
   errorMessage: string | null;
 
+  // ─── 流式输出 ────────────────────────────
+  /** 流式文本（LLM 逐字输出） */
+  streamingText: string;
+  /** 是否正在进行流式分析 */
+  isStreaming: boolean;
+
   // ─── 分析结果 ─────────────────────────────
   /** 市场环境级别 */
   envLevel: EnvLevel | null;
@@ -89,9 +95,15 @@ interface AppState {
   setCurrentAction: (action: ActionType) => void;
   setError: (message: string | null) => void;
 
+  // 流式操作
+  setStreamingText: (text: string) => void;
+  appendStreamingText: (chunk: string) => void;
+  setIsStreaming: (streaming: boolean) => void;
+
   // 结果操作
   setEnvResult: (level: EnvLevel, sentiment: string, suggestion: string) => void;
   setStockResults: (results: StockResult[]) => void;
+  appendStockResult: (result: StockResult) => void;
   setRawResult: (result: AnalysisResult | null) => void;
   setAnalysisResult: (result: AnalysisResult) => void;
 
@@ -116,6 +128,8 @@ const initialStates: Pick<
   | 'status'
   | 'currentAction'
   | 'errorMessage'
+  | 'streamingText'
+  | 'isStreaming'
   | 'envLevel'
   | 'envSentiment'
   | 'envSuggestion'
@@ -131,6 +145,8 @@ const initialStates: Pick<
   status: 'idle',
   currentAction: 'none',
   errorMessage: null,
+  streamingText: '',
+  isStreaming: false,
   envLevel: null,
   envSentiment: '',
   envSuggestion: '',
@@ -166,12 +182,26 @@ export const useAppStore = create<AppState>((set) => ({
   setError: (message: string | null) =>
     set({ errorMessage: message, status: message ? 'error' : 'idle' }),
 
+  // ─── 流式操作 ─────────────────────────────
+
+  setStreamingText: (text: string) => set({ streamingText: text }),
+
+  appendStreamingText: (chunk: string) =>
+    set((state) => ({ streamingText: state.streamingText + chunk })),
+
+  setIsStreaming: (streaming: boolean) => set({ isStreaming: streaming }),
+
   // ─── 结果操作 ─────────────────────────────
 
   setEnvResult: (level: EnvLevel, sentiment: string, suggestion: string) =>
     set({ envLevel: level, envSentiment: sentiment, envSuggestion: suggestion }),
 
   setStockResults: (results: StockResult[]) => set({ stockResults: results }),
+
+  appendStockResult: (result: StockResult) =>
+    set((state) => ({
+      stockResults: [...state.stockResults, result],
+    })),
 
   setRawResult: (result: AnalysisResult | null) => set({ rawResult: result }),
 
@@ -205,6 +235,8 @@ export const useAppStore = create<AppState>((set) => ({
       rawResult: null,
       errorMessage: null,
       currentAction: 'none',
+      streamingText: '',
+      isStreaming: false,
     }),
 
   reset: () => set({ ...initialStates }),
