@@ -24,11 +24,12 @@ import type {
   DirectionResult,
   StockAnalysisResult,
   ConclusionResult,
+  AnalysisResult,
 } from './utils/types';
 
 import { swLog } from './utils/sw-logger';
 import { EastMoneyAdapter } from './data/eastmoney';
-import { AnalysisEngine } from './engine';
+import { AnalysisEngine, L2DirectionAnalyzer } from './engine';
 import type { StreamEvent, StreamProgress } from './utils/types';
 
 // ═══════════════════════════════════════════════════════════════
@@ -326,12 +327,42 @@ registry.register<unknown, { status: string; version: string }>(
 );
 
 /**
+ * OPEN_SIDE_PANEL — 从 Content Script 打开 Side Panel
+ *
+ * 预期 payload: { stock: { code: string; name: string } }
+ * 将股票信息转发给 Side Panel
+ */
+registry.register<{ stock?: { code: string; name: string } }, { opened: boolean }>(
+  'OPEN_SIDE_PANEL',
+  async (payload, _sender) => {
+    const stockInfo = payload?.stock;
+    if (stockInfo) {
+      swLog.info(`从 Content Script 打开 Side Panel: ${stockInfo.name}(${stockInfo.code})`);
+
+      // 存储当前待分析股票，Side Panel 启动时读取
+      await chrome.storage.local.set({
+        xvqiu_pending_stock: stockInfo,
+      });
+    }
+
+    // 尝试打开 Side Panel
+    try {
+      await (chrome.sidePanel.open as (window?: {}) => Promise<void>)({});
+      return { opened: true };
+    } catch (err) {
+      swLog.warn('打开 Side Panel 失败:', err);
+      return { opened: false };
+    }
+  },
+);
+
+/**
  * ANALYZE_POOL — 股票池分析
  *
  * 预期 payload: { stocks: string[] }
- * 实际业务将在 S2 接入分析引擎后实现
+ * 使用分析引擎执行四层过滤
  */
-registry.register<{ stocks?: string[] }, { message: string; count: number }>(
+registry.register<{ stocks?: string[] }, AnalysisResult>(
   'ANALYZE_POOL',
   async (payload, _sender) => {
     const stockList = payload?.stocks ?? [];
@@ -345,11 +376,11 @@ registry.register<{ stocks?: string[] }, { message: string; count: number }>(
       throw new Error('单次分析最多支持 50 只股票');
     }
 
-    // TODO: S2 — 接入四层分析引擎
-    return {
-      message: '股票池分析将在 Sprint 2 实现',
-      count: stockList.length,
-    };
+    const result = await analysisEngine.analyzePool({
+      stocks: stockList,
+    });
+    swLog.info(`股票池分析完成: ${result.conclusions.length} 条结论`);
+    return result;
   },
 );
 
@@ -386,17 +417,37 @@ registry.register<
  * ENV_CHECK — 环境诊断
  *
  * 预期 payload: 任意（可为空）
- * 返回当前市场环境级别
+ * 返回当前市场环境级别 + 方向判断 + 指数/板块/热门题材数据
  */
-registry.register<unknown, { message: string; envLevel: string }>(
+registry.register<unknown, {
+  envLevel: string;
+  sentiment: string;
+  suggestion: string;
+  indices: MarketIndex[];
+  sectors: SectorData[];
+  topics: HotTopic[];
+  directions: DirectionResult[];
+}>(
   'ENV_CHECK',
   async (_payload, _sender) => {
     swLog.info('环境诊断请求');
 
-    // TODO: S2 — 接入 L1 MarketAnalyzer
+    const envResult = await analysisEngine.envCheck();
+
+    // 运行 L2 方向分析
+    const l2 = new L2DirectionAnalyzer();
+    const directions = await l2.analyze(envResult.sectors, envResult.topics);
+
+    swLog.info(`环境诊断完成: 级别 ${envResult.envLevel}, 方向 ${directions.length} 条`);
+
     return {
-      message: '环境诊断将在 Sprint 2 实现',
-      envLevel: '--',
+      envLevel: envResult.envLevel,
+      sentiment: envResult.sentiment,
+      suggestion: envResult.suggestion,
+      indices: envResult.indices,
+      sectors: envResult.sectors,
+      topics: envResult.topics,
+      directions,
     };
   },
 );

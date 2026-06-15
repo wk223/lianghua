@@ -8,7 +8,7 @@
  */
 
 import React, { useCallback } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { useAppStore, type StockResult } from '../stores/useAppStore';
 import type { ChromeMessage, ChromeResponse } from '../../utils/types';
 
 const QuickActions: React.FC = () => {
@@ -45,6 +45,10 @@ const QuickActions: React.FC = () => {
           response.data.sentiment,
           response.data.suggestion,
         );
+        // 同时设置方向结果（如果有）
+        if (response.data.directions?.length > 0) {
+          useAppStore.getState().setDirections(response.data.directions);
+        }
         setStatus('success');
       } else {
         setError(response?.error ?? '环境检查失败');
@@ -84,9 +88,12 @@ const QuickActions: React.FC = () => {
       const response: ChromeResponse = await chrome.runtime.sendMessage(message);
 
       if (response?.success && response.data) {
-        // 分析结果通过 setAnalysisResult 设置
-        // 当前引擎未实现，模拟成功响应等待后续 sprint
-        setStatus('success');
+        // 使用 setAnalysisResult 设置完整分析结果
+        if (typeof response.data === 'object' && 'marketEnv' in response.data) {
+          useAppStore.getState().setAnalysisResult(response.data as any);
+        } else {
+          setStatus('success');
+        }
       } else {
         setError(response?.error ?? '分析请求失败');
       }

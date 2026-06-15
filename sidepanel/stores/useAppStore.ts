@@ -7,7 +7,7 @@
  */
 
 import { create } from 'zustand';
-import type { AnalysisResult, EnvLevel, Verdict } from '../../utils/types';
+import type { AnalysisResult, DirectionResult, EnvLevel, Verdict } from '../../utils/types';
 
 // ─── 状态类型 ──────────────────────────────────────────
 
@@ -69,6 +69,8 @@ interface AppState {
   envSentiment: string;
   /** 仓位建议 */
   envSuggestion: string;
+  /** L2 方向判断结果列表 */
+  directions: DirectionResult[];
   /** 个股分析结果列表 */
   stockResults: StockResult[];
   /** 原始完整分析结果（用于调试/历史） */
@@ -102,6 +104,8 @@ interface AppState {
 
   // 结果操作
   setEnvResult: (level: EnvLevel, sentiment: string, suggestion: string) => void;
+  setDirections: (directions: DirectionResult[]) => void;
+  appendDirection: (direction: DirectionResult) => void;
   setStockResults: (results: StockResult[]) => void;
   appendStockResult: (result: StockResult) => void;
   setRawResult: (result: AnalysisResult | null) => void;
@@ -133,6 +137,7 @@ const initialStates: Pick<
   | 'envLevel'
   | 'envSentiment'
   | 'envSuggestion'
+  | 'directions'
   | 'stockResults'
   | 'rawResult'
   | 'hasApiKey'
@@ -150,6 +155,7 @@ const initialStates: Pick<
   envLevel: null,
   envSentiment: '',
   envSuggestion: '',
+  directions: [],
   stockResults: [],
   rawResult: null,
   hasApiKey: false,
@@ -196,6 +202,13 @@ export const useAppStore = create<AppState>((set) => ({
   setEnvResult: (level: EnvLevel, sentiment: string, suggestion: string) =>
     set({ envLevel: level, envSentiment: sentiment, envSuggestion: suggestion }),
 
+  setDirections: (directions: DirectionResult[]) => set({ directions }),
+
+  appendDirection: (direction: DirectionResult) =>
+    set((state) => ({
+      directions: [...state.directions, direction],
+    })),
+
   setStockResults: (results: StockResult[]) => set({ stockResults: results }),
 
   appendStockResult: (result: StockResult) =>
@@ -211,6 +224,7 @@ export const useAppStore = create<AppState>((set) => ({
       envLevel: result.marketEnv.envLevel,
       envSentiment: result.marketEnv.sentiment,
       envSuggestion: result.marketEnv.suggestion,
+      directions: result.directions,
       stockResults: result.conclusions.map((c) => ({
         code: c.stockCode,
         name: c.stockName,
@@ -231,6 +245,7 @@ export const useAppStore = create<AppState>((set) => ({
       envLevel: null,
       envSentiment: '',
       envSuggestion: '',
+      directions: [],
       stockResults: [],
       rawResult: null,
       errorMessage: null,

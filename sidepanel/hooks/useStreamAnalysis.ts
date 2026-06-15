@@ -89,7 +89,12 @@ export function useStreamAnalysis() {
 
               // ── L2 方向结果 ──
               case 'stream:directions': {
-                // 方向结果暂存，最终随结论一起展示
+                const dirData = event.data as DirectionResult[];
+                if (Array.isArray(dirData)) {
+                  store.setDirections(dirData);
+                } else if (event.data && typeof event.data === 'object') {
+                  store.appendDirection(event.data as DirectionResult);
+                }
                 break;
               }
 

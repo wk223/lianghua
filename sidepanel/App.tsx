@@ -20,6 +20,7 @@ import EmptyState from './components/EmptyState';
 import LoadingState from './components/LoadingState';
 import ErrorState from './components/ErrorState';
 import SettingsPanel from './components/SettingsPanel';
+import Watchlist from './components/Watchlist';
 
 const App: React.FC = () => {
   const {
@@ -137,6 +138,9 @@ const App: React.FC = () => {
 
         {/* 快捷操作按钮 */}
         <QuickActions />
+
+        {/* 自选股管理 */}
+        <Watchlist />
 
         {/* 错误提示（在结果区上方） */}
         {status === 'error' && <ErrorState />}

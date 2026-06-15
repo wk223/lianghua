@@ -31,7 +31,12 @@ export type MessageType =
   | 'GET_QUOTE'
   | 'GET_MARKET'
   | 'GET_SECTOR'
-  | 'ANALYSIS_RESULT';
+  | 'ANALYSIS_RESULT'
+  // Content Script 相关
+  | 'OPEN_SIDE_PANEL'
+  | 'CONTENT_SCRIPT_PING'
+  | 'CONTENT_SCRIPT_REFRESH'
+  | 'CONTENT_SCRIPT_REMOVE';
 
 /** 流式事件类型（通过 Port 推送） */
 export type StreamEventType =
