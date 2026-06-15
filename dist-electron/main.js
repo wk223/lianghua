@@ -1,93 +1,120 @@
-import { ipcMain as w, BrowserWindow as ce, app as P } from "electron";
-import * as R from "path";
-import { fileURLToPath as Ye } from "url";
-import * as O from "fs";
-async function Ne(i, e = {}) {
+var _a;
+import { ipcMain, BrowserWindow, app } from "electron";
+import * as path from "path";
+import { fileURLToPath } from "url";
+import * as fs from "fs";
+async function withRetry(fn, options = {}) {
   const {
-    maxRetries: t = 3,
-    baseDelay: s = 1e3,
-    maxDelay: n = 1e4,
-    onRetry: r
-  } = e;
-  let o;
-  for (let c = 0; c <= t; c++)
+    maxRetries = 3,
+    baseDelay = 1e3,
+    maxDelay = 1e4,
+    onRetry
+  } = options;
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await i();
-    } catch (a) {
-      if (o = a, c < t) {
-        const u = Math.min(s * Math.pow(2, c), n);
-        r == null || r(o, c), await new Promise((l) => setTimeout(l, u));
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries) {
+        const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+        onRetry == null ? void 0 : onRetry(lastError, attempt);
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
-  throw o;
+  }
+  throw lastError;
 }
-const Je = {
+const DEFAULT_RATE_LIMIT = {
   maxRequests: 5,
   windowMs: 1e3
   // 5 req / sec
-}, we = 8e3, qe = 3e4, Ve = 3, Qe = 6e4;
-class Ge {
-  constructor(e = Je) {
-    this.rateLimit = e, this.cache = /* @__PURE__ */ new Map(), this.rateLimitQueue = [], this.lastRequestTime = 0, this.processingQueue = !1, this.stats = {
+};
+const DEFAULT_TIMEOUT = 8e3;
+const DEFAULT_TTL = 3e4;
+const DEFAULT_RETRY = 3;
+const CACHE_CLEANUP_INTERVAL = 6e4;
+class DataFetcher {
+  constructor(rateLimit = DEFAULT_RATE_LIMIT) {
+    this.rateLimit = rateLimit;
+    this.cache = /* @__PURE__ */ new Map();
+    this.rateLimitQueue = [];
+    this.lastRequestTime = 0;
+    this.processingQueue = false;
+    this.stats = {
       totalRequests: 0,
       cacheHits: 0,
       cacheMisses: 0,
       failedRequests: 0,
       rateLimited: 0
-    }, this.cleanupTimer = null, typeof setInterval < "u" && (this.cleanupTimer = setInterval(
-      () => this.evictExpired(),
-      Qe
-    ));
+    };
+    this.cleanupTimer = null;
+    if (typeof setInterval !== "undefined") {
+      this.cleanupTimer = setInterval(
+        () => this.evictExpired(),
+        CACHE_CLEANUP_INTERVAL
+      );
+    }
   }
   // ─── 公开 API ──────────────────────────────────────────
   /**
    * 发起 HTTP 请求，返回解析后的 JSON 数据
    * 集成：速率限制 → 缓存检查 → 超时 → 重试
    */
-  async fetchJSON(e, t = {}) {
+  async fetchJSON(url, options = {}) {
     this.stats.totalRequests++;
     const {
-      useCache: s = !0,
-      ttl: n = qe,
-      timeout: r = we,
-      retry: o = Ve,
-      headers: c = {}
-    } = t;
-    if (s) {
-      const a = this.getFromCache(e);
-      if (a !== null)
-        return this.stats.cacheHits++, a;
+      useCache = true,
+      ttl = DEFAULT_TTL,
+      timeout = DEFAULT_TIMEOUT,
+      retry = DEFAULT_RETRY,
+      headers = {}
+    } = options;
+    if (useCache) {
+      const cached = this.getFromCache(url);
+      if (cached !== null) {
+        this.stats.cacheHits++;
+        return cached;
+      }
     }
     this.stats.cacheMisses++;
     try {
-      const a = await this.executeWithRateLimit(e, r, o, c);
-      return s && this.setCache(e, a, n), a;
-    } catch (a) {
-      throw this.stats.failedRequests++, a;
+      const data = await this.executeWithRateLimit(url, timeout, retry, headers);
+      if (useCache) {
+        this.setCache(url, data, ttl);
+      }
+      return data;
+    } catch (err) {
+      this.stats.failedRequests++;
+      throw err;
     }
   }
   /**
    * 发起原始 HTTP 请求，返回 Response（不缓存、不限速）
    * 适用于流式或非 JSON 场景
    */
-  async fetchRaw(e, t = we) {
-    const s = new AbortController(), n = setTimeout(() => s.abort(), t);
+  async fetchRaw(url, timeout = DEFAULT_TIMEOUT) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      return await fetch(e, {
-        signal: s.signal
+      const response = await fetch(url, {
+        signal: controller.signal
       });
+      return response;
     } finally {
-      clearTimeout(n);
+      clearTimeout(timer);
     }
   }
   // ─── 缓存管理 ──────────────────────────────────────────
   /** 清空所有缓存 */
   clearCache() {
-    this.cache.clear(), this.stats.cacheHits = 0, this.stats.cacheMisses = 0;
+    this.cache.clear();
+    this.stats.cacheHits = 0;
+    this.stats.cacheMisses = 0;
   }
   /** 删除指定 URL 的缓存 */
-  invalidateCache(e) {
-    this.cache.delete(e);
+  invalidateCache(url) {
+    this.cache.delete(url);
   }
   /** 获取当前缓存大小（条目数） */
   get cacheSize() {
@@ -110,49 +137,60 @@ class Ge {
   // ─── 生命周期 ──────────────────────────────────────────
   /** 释放资源 */
   destroy() {
-    this.cleanupTimer !== null && (clearInterval(this.cleanupTimer), this.cleanupTimer = null), this.cache.clear();
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    this.cache.clear();
   }
   // ─── 内部实现 ──────────────────────────────────────────
   /**
    * 执行带速率限制的请求
    * 使用队列确保不超过 rateLimit.maxRequests / rateLimit.windowMs
    */
-  async executeWithRateLimit(e, t, s, n) {
-    return await this.enqueue(), Ne(
+  async executeWithRateLimit(url, timeout, retry, headers) {
+    await this.enqueue();
+    return withRetry(
       async () => {
-        const r = new AbortController(), o = setTimeout(() => r.abort(), t);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
         try {
-          const c = await fetch(e, {
-            signal: r.signal,
+          const response = await fetch(url, {
+            signal: controller.signal,
             headers: {
-              Accept: "application/json",
+              "Accept": "application/json",
               "Accept-Language": "zh-CN,zh;q=0.9",
-              Referer: "https://quote.eastmoney.com/",
-              ...n
+              "Referer": "https://quote.eastmoney.com/",
+              ...headers
             }
           });
-          if (!c.ok)
+          if (!response.ok) {
             throw new Error(
-              `HTTP ${c.status}: ${c.statusText} (${e})`
+              `HTTP ${response.status}: ${response.statusText} (${url})`
             );
-          const a = await c.text();
-          if (!a || a.trim().length === 0)
+          }
+          const text = await response.text();
+          if (!text || text.trim().length === 0) {
             throw new Error("东方财富 API 返回空数据");
-          return JSON.parse(a);
-        } catch (c) {
-          throw c instanceof DOMException && c.name === "AbortError" ? new Error(`请求超时 (${t}ms): ${e}`) : c;
+          }
+          return JSON.parse(text);
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") {
+            throw new Error(`请求超时 (${timeout}ms): ${url}`);
+          }
+          throw err;
         } finally {
-          clearTimeout(o);
+          clearTimeout(timer);
         }
       },
       {
-        maxRetries: s,
+        maxRetries: retry,
         baseDelay: 500,
         maxDelay: 5e3,
-        onRetry: (r, o) => {
+        onRetry: (error, attempt) => {
           console.warn(
-            `[DataFetcher] 重试 #${o + 1}/${s}: ${e}`,
-            r.message
+            `[DataFetcher] 重试 #${attempt + 1}/${retry}: ${url}`,
+            error.message
           );
         }
       }
@@ -163,42 +201,69 @@ class Ge {
    * 保证请求间隔不小于 windowMs / maxRequests
    */
   enqueue() {
-    return new Promise((e) => {
-      this.rateLimitQueue.push(e), this.processingQueue || this.processQueue();
+    return new Promise((resolve) => {
+      this.rateLimitQueue.push(resolve);
+      if (!this.processingQueue) {
+        this.processQueue();
+      }
     });
   }
   async processQueue() {
-    for (this.processingQueue = !0; this.rateLimitQueue.length > 0; ) {
-      const t = Date.now() - this.lastRequestTime, s = this.rateLimit.windowMs / this.rateLimit.maxRequests;
-      t < s && await Xe(s - t);
-      const n = this.rateLimitQueue.shift();
-      n && (this.lastRequestTime = Date.now(), n());
+    this.processingQueue = true;
+    while (this.rateLimitQueue.length > 0) {
+      const now = Date.now();
+      const elapsed = now - this.lastRequestTime;
+      const minInterval = this.rateLimit.windowMs / this.rateLimit.maxRequests;
+      if (elapsed < minInterval) {
+        await sleep(minInterval - elapsed);
+      }
+      const next = this.rateLimitQueue.shift();
+      if (next) {
+        this.lastRequestTime = Date.now();
+        next();
+      }
     }
-    this.processingQueue = !1;
+    this.processingQueue = false;
   }
   // ─── 缓存操作 ──────────────────────────────────────────
-  getFromCache(e) {
-    const t = this.cache.get(e);
-    return t ? Date.now() - t.timestamp > t.ttl ? (this.cache.delete(e), null) : t.data : null;
+  getFromCache(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.data;
   }
-  setCache(e, t, s) {
-    this.cache.set(e, {
-      data: t,
+  setCache(key, data, ttl) {
+    this.cache.set(key, {
+      data,
       timestamp: Date.now(),
-      ttl: s
+      ttl
     });
   }
   /** 清理过期缓存条目 */
   evictExpired() {
-    const e = Date.now();
-    for (const [t, s] of this.cache.entries())
-      e - s.timestamp > s.ttl && this.cache.delete(t);
+    const now = Date.now();
+    for (const [key, entry] of this.cache.entries()) {
+      if (now - entry.timestamp > entry.ttl) {
+        this.cache.delete(key);
+      }
+    }
   }
 }
-function Xe(i) {
-  return new Promise((e) => setTimeout(e, i));
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
-const he = "https://push2.eastmoney.com/api/qt", Ze = "/stock/get", et = "/ulist.np/get", tt = "/clist/get", X = "f2,f3,f4,f12,f14,f20,f62,f104,f128,f140,f141,f142", st = "f2,f3,f4,f5,f6,f12,f14", Ue = "f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f55,f57,f58,f60,f116,f117,f162,f167", nt = "f43,f44,f45,f46,f47,f48,f50,f52,f55,f57,f58,f60,f62,f115,f128,f140", rt = [
+const API_BASE = "https://push2.eastmoney.com/api/qt";
+const STOCK_GET_PATH = "/stock/get";
+const ULIST_PATH = "/ulist.np/get";
+const CLIST_PATH = "/clist/get";
+const SECTOR_FIELDS = "f2,f3,f4,f12,f14,f20,f62,f104,f128,f140,f141,f142";
+const SECTOR_STOCK_FIELDS = "f2,f3,f4,f5,f6,f12,f14";
+const STOCK_FIELDS = "f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f55,f57,f58,f60,f116,f117,f162,f167";
+const INDEX_FIELDS = "f43,f44,f45,f46,f47,f48,f50,f52,f55,f57,f58,f60,f62,f115,f128,f140";
+const INDEX_SECIDS = [
   "1.000001",
   // 上证指数
   "0.399001",
@@ -207,26 +272,29 @@ const he = "https://push2.eastmoney.com/api/qt", Ze = "/stock/get", et = "/ulist
   // 创业板指
   "1.000688"
   // 科创50
-], it = {
-  6: 1,
+];
+const EXCHANGE_MAP = {
+  "6": 1,
   // SH
-  5: 1,
+  "5": 1,
   // SH 基金/债券
-  0: 0,
+  "0": 0,
   // SZ 主板
-  3: 0,
+  "3": 0,
   // SZ 创业板
-  4: 0,
+  "4": 0,
   // BJ / 新三板
-  8: 0
+  "8": 0
   // BJ 北交所
-}, b = 1e4, ot = 15e3;
-class He {
+};
+const QUOTE_TTL = 1e4;
+const INDEX_TTL = 15e3;
+class EastMoneyAdapter {
   /**
    * @param fetcher 可注入自定义 DataFetcher（便于测试 / 共享限制器）
    */
-  constructor(e) {
-    this.fetcher = e ?? new Ge();
+  constructor(fetcher) {
+    this.fetcher = fetcher ?? new DataFetcher();
   }
   // ─── 公开接口 ──────────────────────────────────────────
   /**
@@ -236,18 +304,22 @@ class He {
    * @returns StockQuote
    * @throws 股票代码无效 / 网络异常 / API 返回空数据
    */
-  async getQuote(e, t) {
-    const s = e.replace(/^(SH|SZ|BJ)/i, "").trim();
-    if (!/^\d{6}$/.test(s))
-      throw new Error(`无效的股票代码: ${e}，应为 6 位数字`);
-    const n = ve(s), r = ct(n), o = await this.fetcher.fetchJSON(r, {
-      useCache: !0,
-      ttl: b,
-      ...t
+  async getQuote(code, options) {
+    const cleanCode = code.replace(/^(SH|SZ|BJ)/i, "").trim();
+    if (!/^\d{6}$/.test(cleanCode)) {
+      throw new Error(`无效的股票代码: ${code}，应为 6 位数字`);
+    }
+    const secid = buildSecId(cleanCode);
+    const url = buildStockGetUrl(secid);
+    const response = await this.fetcher.fetchJSON(url, {
+      useCache: true,
+      ttl: QUOTE_TTL,
+      ...options
     });
-    if (!o.data)
-      throw new Error(`东方财富 API 返回空数据: code=${e}`);
-    return Ee(o.data, s);
+    if (!response.data) {
+      throw new Error(`东方财富 API 返回空数据: code=${code}`);
+    }
+    return parseStockQuote(response.data, cleanCode);
   }
   /**
    * 批量获取个股实时行情
@@ -256,30 +328,40 @@ class He {
    * @param options 可选覆写请求配置
    * @returns StockQuote[] — 成功解析的行情列表（失败的静默忽略）
    */
-  async getQuotes(e, t) {
-    if (e.length === 0) return [];
-    if (e.length > 50)
+  async getQuotes(codes, options) {
+    if (codes.length === 0) return [];
+    if (codes.length > 50) {
       throw new Error("批量查询最多支持 50 只股票");
-    const s = e.map((c) => c.replace(/^(SH|SZ|BJ)/i, "").trim()).filter((c) => /^\d{6}$/.test(c));
-    if (s.length === 0) return [];
-    const n = s.map(ve), r = ee(n, Ue), o = await this.fetcher.fetchJSON(r, {
-      useCache: !0,
-      ttl: b,
-      ...t
+    }
+    const validCodes = codes.map((c) => c.replace(/^(SH|SZ|BJ)/i, "").trim()).filter((c) => /^\d{6}$/.test(c));
+    if (validCodes.length === 0) return [];
+    const secids = validCodes.map(buildSecId);
+    const url = buildUlistUrl(secids, STOCK_FIELDS);
+    const response = await this.fetcher.fetchJSON(url, {
+      useCache: true,
+      ttl: QUOTE_TTL,
+      ...options
     });
-    return !o.data || !o.data.diff ? [] : o.data.diff.filter((c) => c !== null && c.f57 !== null).map((c) => Ee(c));
+    if (!response.data || !response.data.diff) {
+      return [];
+    }
+    return response.data.diff.filter((raw) => raw !== null && raw.f57 !== null).map((raw) => parseStockQuote(raw));
   }
   /**
    * 获取大盘指数数据
    * 返回 [上证指数, 深证成指, 创业板指, 科创50]
    */
-  async getMarketIndex(e) {
-    const t = ee([...rt], nt), s = await this.fetcher.fetchJSON(t, {
-      useCache: !0,
-      ttl: ot,
-      ...e
+  async getMarketIndex(options) {
+    const url = buildUlistUrl([...INDEX_SECIDS], INDEX_FIELDS);
+    const response = await this.fetcher.fetchJSON(url, {
+      useCache: true,
+      ttl: INDEX_TTL,
+      ...options
     });
-    return !s.data || !s.data.diff ? [] : s.data.diff.filter((n) => n !== null && n.f57 !== null).map(ht);
+    if (!response.data || !response.data.diff) {
+      return [];
+    }
+    return response.data.diff.filter((raw) => raw !== null && raw.f57 !== null).map(parseMarketIndex);
   }
   // ─── 板块/题材接口 ──────────────────────────────────
   /**
@@ -290,13 +372,17 @@ class He {
    * @param options 可选覆写请求配置
    * @returns SectorData[]
    */
-  async getSectors(e) {
-    const t = Z("m:90+t:2", 20, X, "f3"), s = await this.fetcher.fetchJSON(t, {
-      useCache: !0,
-      ttl: b,
-      ...e
+  async getSectors(options) {
+    const url = buildClistUrl("m:90+t:2", 20, SECTOR_FIELDS, "f3");
+    const response = await this.fetcher.fetchJSON(url, {
+      useCache: true,
+      ttl: QUOTE_TTL,
+      ...options
     });
-    return !s.data || !s.data.diff ? [] : s.data.diff.filter((n) => n !== null && n.f12 !== null).map(Ae);
+    if (!response.data || !response.data.diff) {
+      return [];
+    }
+    return response.data.diff.filter((raw) => raw !== null && raw.f12 !== null).map(parseSectorData);
   }
   /**
    * 获取板块明细（含成分股列表）
@@ -309,26 +395,34 @@ class He {
    * @returns SectorDetail
    * @throws 板块代码无效 / 板块不存在
    */
-  async getSectorDetail(e, t) {
-    var m, d, y;
-    const n = `BK${e.replace(/^BK/i, "").trim().toUpperCase()}`;
-    if (!/^BK\d{4}$/i.test(n))
+  async getSectorDetail(code, options) {
+    var _a2, _b, _c;
+    const cleanCode = code.replace(/^BK/i, "").trim().toUpperCase();
+    const sectorCode = `BK${cleanCode}`;
+    if (!/^BK\d{4}$/i.test(sectorCode)) {
       throw new Error(
-        `无效的板块代码: ${e}，应为 BK + 4 位数字（如 BK0477）`
+        `无效的板块代码: ${code}，应为 BK + 4 位数字（如 BK0477）`
       );
-    const r = `90.${n}`, o = ee([r], X), c = await this.fetcher.fetchJSON(o, {
-      useCache: !0,
-      ttl: b,
-      ...t
+    }
+    const secid = `90.${sectorCode}`;
+    const metaUrl = buildUlistUrl([secid], SECTOR_FIELDS);
+    const metaResp = await this.fetcher.fetchJSON(metaUrl, {
+      useCache: true,
+      ttl: QUOTE_TTL,
+      ...options
     });
-    if (!((d = (m = c.data) == null ? void 0 : m.diff) != null && d[0]))
-      throw new Error(`板块不存在: ${n}`);
-    const a = Ae(c.data.diff[0]), u = Z(`b:${n}`, 50, st, "f3"), g = (((y = (await this.fetcher.fetchJSON(u, {
-      useCache: !0,
-      ttl: b,
-      ...t
-    })).data) == null ? void 0 : y.diff) ?? []).filter((p) => p !== null && p.f12 !== null).map(lt);
-    return { sector: a, stocks: g };
+    if (!((_b = (_a2 = metaResp.data) == null ? void 0 : _a2.diff) == null ? void 0 : _b[0])) {
+      throw new Error(`板块不存在: ${sectorCode}`);
+    }
+    const sector = parseSectorData(metaResp.data.diff[0]);
+    const stocksUrl = buildClistUrl(`b:${sectorCode}`, 50, SECTOR_STOCK_FIELDS, "f3");
+    const stocksResp = await this.fetcher.fetchJSON(stocksUrl, {
+      useCache: true,
+      ttl: QUOTE_TTL,
+      ...options
+    });
+    const stocks = (((_c = stocksResp.data) == null ? void 0 : _c.diff) ?? []).filter((raw) => raw !== null && raw.f12 !== null).map(parseSectorStock);
+    return { sector, stocks };
   }
   /**
    * 获取热门题材/概念列表
@@ -338,13 +432,17 @@ class He {
    * @param options 可选覆写请求配置
    * @returns HotTopic[]
    */
-  async getHotTopics(e) {
-    const t = Z("m:90+t:3", 20, X, "f3"), s = await this.fetcher.fetchJSON(t, {
-      useCache: !0,
-      ttl: b,
-      ...e
+  async getHotTopics(options) {
+    const url = buildClistUrl("m:90+t:3", 20, SECTOR_FIELDS, "f3");
+    const response = await this.fetcher.fetchJSON(url, {
+      useCache: true,
+      ttl: QUOTE_TTL,
+      ...options
     });
-    return !s.data || !s.data.diff ? [] : s.data.diff.filter((n) => n !== null && n.f12 !== null).map(ut);
+    if (!response.data || !response.data.diff) {
+      return [];
+    }
+    return response.data.diff.filter((raw) => raw !== null && raw.f12 !== null).map(parseHotTopic);
   }
   /**
    * 获取底层 DataFetcher 实例
@@ -354,144 +452,153 @@ class He {
     return this.fetcher;
   }
 }
-function at(i) {
-  const e = i.charAt(0);
-  return it[e] ?? 0;
+function getMarketCode(code) {
+  const prefix = code.charAt(0);
+  return EXCHANGE_MAP[prefix] ?? 0;
 }
-function ve(i) {
-  return `${at(i)}.${i}`;
+function buildSecId(code) {
+  const market = getMarketCode(code);
+  return `${market}.${code}`;
 }
-function ct(i) {
-  const e = new URLSearchParams({
+function buildStockGetUrl(secid) {
+  const params = new URLSearchParams({
     fltt: "2",
-    secid: i,
-    fields: Ue,
+    secid,
+    fields: STOCK_FIELDS,
     _: String(Date.now())
   });
-  return `${he}${Ze}?${e.toString()}`;
+  return `${API_BASE}${STOCK_GET_PATH}?${params.toString()}`;
 }
-function Z(i, e, t, s = "f3", n = 1) {
-  const r = new URLSearchParams({
+function buildClistUrl(fs2, pz, fields, fid = "f3", po = 1) {
+  const params = new URLSearchParams({
     pn: "1",
-    pz: String(e),
-    po: String(n),
+    pz: String(pz),
+    po: String(po),
     np: "1",
     fltt: "2",
     invt: "2",
-    fid: s,
-    fs: i,
-    fields: t,
+    fid,
+    fs: fs2,
+    fields,
     _: String(Date.now())
   });
-  return `${he}${tt}?${r.toString()}`;
+  return `${API_BASE}${CLIST_PATH}?${params.toString()}`;
 }
-function ee(i, e) {
-  const t = new URLSearchParams({
+function buildUlistUrl(secids, fields) {
+  const params = new URLSearchParams({
     fltt: "2",
-    secids: i.join(","),
-    fields: e,
+    secids: secids.join(","),
+    fields,
     _: String(Date.now())
   });
-  return `${he}${et}?${t.toString()}`;
+  return `${API_BASE}${ULIST_PATH}?${params.toString()}`;
 }
-function Ee(i, e) {
-  const t = i.f57 ?? e ?? "000000", s = f(i.f43, 0);
-  f(i.f60, s);
-  const n = f(i.f52, 0), r = f(i.f55, 0);
+function parseStockQuote(raw, fallbackCode) {
+  const code = raw.f57 ?? fallbackCode ?? "000000";
+  const price = safeNumber(raw.f43, 0);
+  safeNumber(raw.f60, price);
+  const change = safeNumber(raw.f52, 0);
+  const changePercent = safeNumber(raw.f55, 0);
   return {
-    code: t,
-    name: i.f58 ?? "",
-    price: s,
-    change: n,
-    changePercent: r,
-    volume: f(i.f47, 0),
-    turnover: f(i.f48, 0),
-    high: f(i.f44, s),
-    low: f(i.f45, s),
-    open: f(i.f46, s),
-    amplitude: f(i.f49, 0),
-    turnoverRate: f(i.f50, 0)
+    code,
+    name: raw.f58 ?? "",
+    price,
+    change,
+    changePercent,
+    volume: safeNumber(raw.f47, 0),
+    turnover: safeNumber(raw.f48, 0),
+    high: safeNumber(raw.f44, price),
+    low: safeNumber(raw.f45, price),
+    open: safeNumber(raw.f46, price),
+    amplitude: safeNumber(raw.f49, 0),
+    turnoverRate: safeNumber(raw.f50, 0)
   };
 }
-function ht(i) {
-  const e = f(i.f43, 0), t = f(i.f52, 0);
+function parseMarketIndex(raw) {
+  const price = safeNumber(raw.f43, 0);
+  const change = safeNumber(raw.f52, 0);
   return {
-    code: i.f57 ?? "000000",
-    name: i.f58 ?? "",
-    price: e,
-    change: t,
-    changePercent: f(i.f55, 0),
-    volume: f(i.f47, 0),
-    amount: f(i.f48, 0)
+    code: raw.f57 ?? "000000",
+    name: raw.f58 ?? "",
+    price,
+    change,
+    changePercent: safeNumber(raw.f55, 0),
+    volume: safeNumber(raw.f47, 0),
+    amount: safeNumber(raw.f48, 0)
   };
 }
-function Ae(i) {
-  const e = i.f12 ?? "BK0000", t = i.f62 != null ? String(i.f62).padStart(6, "0") : "";
+function parseSectorData(raw) {
+  const code = raw.f12 ?? "BK0000";
+  const leadingStockCode = raw.f62 != null ? String(raw.f62).padStart(6, "0") : "";
   return {
-    code: e,
-    name: i.f14 ?? "",
-    changePercent: f(i.f3, 0),
-    change: f(i.f4, 0),
-    indexValue: f(i.f2, 0),
-    leadingStock: i.f104 ?? "",
-    leadingStockCode: t,
-    leadingChange: f(i.f128, 0),
-    upCount: f(i.f140, 0),
-    downCount: f(i.f141, 0),
-    capitalFlow: f(i.f142, 0)
+    code,
+    name: raw.f14 ?? "",
+    changePercent: safeNumber(raw.f3, 0),
+    change: safeNumber(raw.f4, 0),
+    indexValue: safeNumber(raw.f2, 0),
+    leadingStock: raw.f104 ?? "",
+    leadingStockCode,
+    leadingChange: safeNumber(raw.f128, 0),
+    upCount: safeNumber(raw.f140, 0),
+    downCount: safeNumber(raw.f141, 0),
+    capitalFlow: safeNumber(raw.f142, 0)
   };
 }
-function lt(i) {
+function parseSectorStock(raw) {
   return {
-    code: i.f12 ?? "000000",
-    name: i.f14 ?? "",
-    price: f(i.f2, 0),
-    changePercent: f(i.f3, 0),
-    change: f(i.f4, 0),
-    volume: f(i.f5, 0),
-    turnover: f(i.f6, 0)
+    code: raw.f12 ?? "000000",
+    name: raw.f14 ?? "",
+    price: safeNumber(raw.f2, 0),
+    changePercent: safeNumber(raw.f3, 0),
+    change: safeNumber(raw.f4, 0),
+    volume: safeNumber(raw.f5, 0),
+    turnover: safeNumber(raw.f6, 0)
   };
 }
-function ut(i) {
-  const e = i.f12 ?? "BK0000", t = i.f62 != null ? String(i.f62).padStart(6, "0") : "";
+function parseHotTopic(raw) {
+  const code = raw.f12 ?? "BK0000";
+  const leadingStockCode = raw.f62 != null ? String(raw.f62).padStart(6, "0") : "";
   return {
-    code: e,
-    name: i.f14 ?? "",
-    changePercent: f(i.f3, 0),
-    change: f(i.f4, 0),
-    leadingStock: i.f104 ?? "",
-    leadingStockCode: t,
-    leadingChange: f(i.f128, 0),
-    upCount: f(i.f140, 0),
-    downCount: f(i.f141, 0),
-    capitalFlow: f(i.f142, 0)
+    code,
+    name: raw.f14 ?? "",
+    changePercent: safeNumber(raw.f3, 0),
+    change: safeNumber(raw.f4, 0),
+    leadingStock: raw.f104 ?? "",
+    leadingStockCode,
+    leadingChange: safeNumber(raw.f128, 0),
+    upCount: safeNumber(raw.f140, 0),
+    downCount: safeNumber(raw.f141, 0),
+    capitalFlow: safeNumber(raw.f142, 0)
   };
 }
-function f(i, e) {
-  if (i == null) return e;
-  if (typeof i == "number")
-    return Number.isFinite(i) ? i : e;
-  const t = Number(i);
-  return Number.isFinite(t) ? t : e;
+function safeNumber(value, fallback) {
+  if (value === null || value === void 0) return fallback;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
-const ft = "[xvqiu]", pe = {
+const LOG_PREFIX = "[xvqiu]";
+const levelOrder = {
   debug: 0,
   info: 1,
   warn: 2,
   error: 3
 };
-var Oe;
-const gt = typeof window < "u" && (window.location.search.includes("debug=true") || ((Oe = window.localStorage) == null ? void 0 : Oe.getItem("xvqiu_debug")) === "true") ? "debug" : "info";
-function W(i, ...e) {
-  if (pe[i] < pe[gt]) return;
-  (i === "error" ? console.error : i === "warn" ? console.warn : i === "info" ? console.info : console.log)(ft, `[${i.toUpperCase()}]`, ...e);
+const currentLevel = typeof window !== "undefined" && (window.location.search.includes("debug=true") || ((_a = window.localStorage) == null ? void 0 : _a.getItem("xvqiu_debug")) === "true") ? "debug" : "info";
+function log(level, ...args) {
+  if (levelOrder[level] < levelOrder[currentLevel]) return;
+  const fn = level === "error" ? console.error : level === "warn" ? console.warn : level === "info" ? console.info : console.log;
+  fn(LOG_PREFIX, `[${level.toUpperCase()}]`, ...args);
 }
-const h = {
-  debug: (...i) => W("debug", ...i),
-  info: (...i) => W("info", ...i),
-  warn: (...i) => W("warn", ...i),
-  error: (...i) => W("error", ...i)
-}, Y = {
+const logger$1 = {
+  debug: (...args) => log("debug", ...args),
+  info: (...args) => log("info", ...args),
+  warn: (...args) => log("warn", ...args),
+  error: (...args) => log("error", ...args)
+};
+const WEIGHTS$1 = {
   INDEX_TREND: 0.35,
   // 指数趋势权重
   SECTOR_EFFECT: 0.25,
@@ -501,7 +608,7 @@ const h = {
   MARKET_BREADTH: 0.2
   // 市场宽度（涨跌家数等）
 };
-class mt {
+class L1MarketAnalyzer {
   /**
    * 全量分析市场环境
    *
@@ -510,32 +617,46 @@ class mt {
    * @param prevIndices - 前一日指数数据（用于判断趋势变化，可选）
    * @returns MarketEnvResult
    */
-  async analyze(e, t, s) {
-    if (e.length === 0)
-      return h.warn("[L1] 无指数数据，返回默认环境"), {
+  async analyze(indices, sectors, prevIndices) {
+    if (indices.length === 0) {
+      logger$1.warn("[L1] 无指数数据，返回默认环境");
+      return {
         envLevel: "B",
         sentiment: "数据不足",
         suggestion: "等待数据更新后再做判断"
       };
-    const n = this.scoreIndexTrend(e, s), r = this.scoreSectorEffect(t), o = this.scoreVolume(e), c = this.scoreMarketBreadth(e, t), a = n * Y.INDEX_TREND + r * Y.SECTOR_EFFECT + o * Y.VOLUME + c * Y.MARKET_BREADTH, u = this.scoreToLevel(a), l = this.describeSentiment(e, u), g = this.getSuggestion(u, a, e);
-    return h.debug("[L1] 环境评分结果:", {
-      indexScore: n.toFixed(1),
-      sectorScore: r.toFixed(1),
-      volumeScore: o.toFixed(1),
-      breadthScore: c.toFixed(1),
-      totalScore: a.toFixed(1),
-      envLevel: u
-    }), { envLevel: u, sentiment: l, suggestion: g };
+    }
+    const indexScore = this.scoreIndexTrend(indices, prevIndices);
+    const sectorScore = this.scoreSectorEffect(sectors);
+    const volumeScore = this.scoreVolume(indices);
+    const breadthScore = this.scoreMarketBreadth(indices, sectors);
+    const totalScore = indexScore * WEIGHTS$1.INDEX_TREND + sectorScore * WEIGHTS$1.SECTOR_EFFECT + volumeScore * WEIGHTS$1.VOLUME + breadthScore * WEIGHTS$1.MARKET_BREADTH;
+    const envLevel = this.scoreToLevel(totalScore);
+    const sentiment = this.describeSentiment(indices, envLevel);
+    const suggestion = this.getSuggestion(envLevel, totalScore, indices);
+    logger$1.debug("[L1] 环境评分结果:", {
+      indexScore: indexScore.toFixed(1),
+      sectorScore: sectorScore.toFixed(1),
+      volumeScore: volumeScore.toFixed(1),
+      breadthScore: breadthScore.toFixed(1),
+      totalScore: totalScore.toFixed(1),
+      envLevel
+    });
+    return { envLevel, sentiment, suggestion };
   }
   /**
    * 快速判断 — 只给评级，不做详细打分
    * 用于获取数据的模块内部快速判断
    */
-  quickAssess(e) {
-    if (e.length === 0) return "B";
+  quickAssess(indices) {
+    if (indices.length === 0) return "B";
     try {
-      const t = this.averageChange(e);
-      return t >= 1.5 ? "S" : t >= 0.5 ? "A" : t >= -0.5 ? "B" : t >= -1.5 ? "C" : "D";
+      const avgChange = this.averageChange(indices);
+      if (avgChange >= 1.5) return "S";
+      if (avgChange >= 0.5) return "A";
+      if (avgChange >= -0.5) return "B";
+      if (avgChange >= -1.5) return "C";
+      return "D";
     } catch {
       return "B";
     }
@@ -546,25 +667,35 @@ class mt {
    * - 各指数的涨跌幅平均值
    * - 上证/创业板加权（更重要的指数赋予更高权重）
    */
-  scoreIndexTrend(e, t) {
-    if (e.length === 0) return 50;
-    const s = this.averageChange(e);
-    let n = 50 + s / 3 * 50;
-    if (n = Math.max(0, Math.min(100, n)), t && t.length > 0) {
-      const r = this.averageChange(t), o = s - r;
-      o > 0.5 ? n += 10 : o < -0.5 && (n -= 10);
+  scoreIndexTrend(indices, prevIndices) {
+    if (indices.length === 0) return 50;
+    const avgChange = this.averageChange(indices);
+    let score = 50 + avgChange / 3 * 50;
+    score = Math.max(0, Math.min(100, score));
+    if (prevIndices && prevIndices.length > 0) {
+      const prevAvgChange = this.averageChange(prevIndices);
+      const improvement = avgChange - prevAvgChange;
+      if (improvement > 0.5) {
+        score += 10;
+      } else if (improvement < -0.5) {
+        score -= 10;
+      }
     }
-    return Math.max(0, Math.min(100, n));
+    return Math.max(0, Math.min(100, score));
   }
   /**
    * 板块效应评分 (0-100)
    * - 上涨板块比例
    * - 领涨板块的涨幅强度
    */
-  scoreSectorEffect(e) {
-    if (e.length === 0) return 50;
-    const s = e.filter((c) => c.changePercent > 0).length / e.length, n = e.slice(0, 3).reduce((c, a) => c + Math.max(0, a.changePercent), 0) / 3, r = s * 100, o = Math.min(100, n / 5 * 100);
-    return r * 0.6 + o * 0.4;
+  scoreSectorEffect(sectors) {
+    if (sectors.length === 0) return 50;
+    const upCount = sectors.filter((s) => s.changePercent > 0).length;
+    const upRatio = upCount / sectors.length;
+    const top3Avg = sectors.slice(0, 3).reduce((sum, s) => sum + Math.max(0, s.changePercent), 0) / 3;
+    const ratioScore = upRatio * 100;
+    const strengthScore = Math.min(100, top3Avg / 5 * 100);
+    return ratioScore * 0.6 + strengthScore * 0.4;
   }
   /**
    * 成交量能评分 (0-100)
@@ -572,61 +703,82 @@ class mt {
    * - 放量上涨 = 健康
    * - 缩量下跌 = 弱势
    */
-  scoreVolume(e) {
-    if (e.length === 0) return 50;
-    e.find(
-      (s) => s.code === "000001" || s.name.includes("上证")
-    ), e.find(
-      (s) => s.code === "399001" || s.name.includes("深证")
+  scoreVolume(indices) {
+    if (indices.length === 0) return 50;
+    indices.find(
+      (i) => i.code === "000001" || i.name.includes("上证")
     );
-    const t = this.averageChange(e);
-    return t > 1 ? 70 : t > 0 ? 60 : t > -0.5 ? 50 : t > -1.5 ? 30 : 20;
+    indices.find(
+      (i) => i.code === "399001" || i.name.includes("深证")
+    );
+    const avgChange = this.averageChange(indices);
+    if (avgChange > 1) return 70;
+    if (avgChange > 0) return 60;
+    if (avgChange > -0.5) return 50;
+    if (avgChange > -1.5) return 30;
+    return 20;
   }
   /**
    * 市场宽度评分 (0-100)
    * - 上涨/下跌家数比（通过板块数据估算）
    * - 涨停/跌停数量
    */
-  scoreMarketBreadth(e, t) {
-    if (e.length === 0 && t.length === 0) return 50;
-    let s = 0.5;
-    t.length > 0 && (s = t.filter((a) => a.changePercent > 0).length / t.length);
-    const n = s * 100;
-    let r = 0;
-    const o = t.filter(
-      (c) => c.upCount > 0 || c.downCount > 0
+  scoreMarketBreadth(indices, sectors) {
+    if (indices.length === 0 && sectors.length === 0) return 50;
+    let sectorRatio = 0.5;
+    if (sectors.length > 0) {
+      const upCount = sectors.filter((s) => s.changePercent > 0).length;
+      sectorRatio = upCount / sectors.length;
+    }
+    const ratioScore = sectorRatio * 100;
+    let breadthBonus = 0;
+    const sectorWithBreadth = sectors.filter(
+      (s) => s.upCount > 0 || s.downCount > 0
     );
-    return o.length > 0 && (r = (o.reduce((a, u) => {
-      const l = u.upCount + u.downCount;
-      return l > 0 ? a + u.upCount / l : a;
-    }, 0) / o.length - 0.5) * 40), Math.max(0, Math.min(100, n * 0.7 + r));
+    if (sectorWithBreadth.length > 0) {
+      const avgUpDownRatio = sectorWithBreadth.reduce((sum, s) => {
+        const total = s.upCount + s.downCount;
+        return total > 0 ? sum + s.upCount / total : sum;
+      }, 0) / sectorWithBreadth.length;
+      breadthBonus = (avgUpDownRatio - 0.5) * 40;
+    }
+    return Math.max(0, Math.min(100, ratioScore * 0.7 + breadthBonus));
   }
   // ─── 辅助方法 ──────────────────────────────────────
   /** 计算指数平均涨跌幅 */
-  averageChange(e) {
-    return e.length === 0 ? 0 : e.reduce((t, s) => t + s.changePercent, 0) / e.length;
+  averageChange(indices) {
+    if (indices.length === 0) return 0;
+    return indices.reduce((sum, idx) => sum + idx.changePercent, 0) / indices.length;
   }
   /** 分数 → 环境评级 */
-  scoreToLevel(e) {
-    return e >= 80 ? "S" : e >= 60 ? "A" : e >= 40 ? "B" : e >= 20 ? "C" : "D";
+  scoreToLevel(score) {
+    if (score >= 80) return "S";
+    if (score >= 60) return "A";
+    if (score >= 40) return "B";
+    if (score >= 20) return "C";
+    return "D";
   }
   /** 生成情绪描述 */
-  describeSentiment(e, t) {
-    const s = this.averageChange(e), r = {
+  describeSentiment(indices, level) {
+    const avgChange = this.averageChange(indices);
+    const sentimentMap = {
       S: ["情绪亢奋", "赚钱效应强", "市场全面活跃"],
       A: ["情绪偏多", "赚钱效应较好", "市场健康"],
       B: ["情绪中性", "赚钱效应一般", "市场震荡"],
       C: ["情绪偏空", "亏钱效应明显", "市场低迷"],
       D: ["情绪恐慌", "系统性风险", "市场极端弱势"]
-    }[t];
-    return s > 2 ? r[0] : s > 0.5 ? r[1] : r[2];
+    };
+    const options = sentimentMap[level];
+    if (avgChange > 2) return options[0];
+    if (avgChange > 0.5) return options[1];
+    return options[2];
   }
   /** 获取仓位/风格建议 */
-  getSuggestion(e, t, s) {
-    const n = this.averageChange(s);
-    switch (e) {
+  getSuggestion(level, score, indices) {
+    const avgChange = this.averageChange(indices);
+    switch (level) {
       case "S":
-        return n > 2 ? "可积极做多，仓位 7-8 成，追涨需谨慎" : "可适当加仓，仓位 5-7 成，围绕主线操作";
+        return avgChange > 2 ? "可积极做多，仓位 7-8 成，追涨需谨慎" : "可适当加仓，仓位 5-7 成，围绕主线操作";
       case "A":
         return "仓位 4-6 成，聚焦主线，避免追高";
       case "B":
@@ -638,7 +790,7 @@ class mt {
     }
   }
 }
-const J = {
+const WEIGHTS = {
   CHANGE: 0.3,
   // 涨幅权重
   BREADTH: 0.25,
@@ -647,14 +799,16 @@ const J = {
   // 资金流向权重
   LEADING: 0.2
   // 领涨股强度权重
-}, Le = {
+};
+const THRESHOLDS = {
   MAIN_LINE: 65,
   // ≥65分 → 主线
   SUB_LINE: 40
   // ≥40分 → 次线
   // <40分 → 一般方向
-}, dt = 3;
-class Be {
+};
+const MAX_DIRECTIONS = 3;
+class L2DirectionAnalyzer {
   /**
    * 分析当前市场方向
    *
@@ -662,120 +816,150 @@ class Be {
    * @param topics  - 概念/题材列表
    * @returns DirectionResult[] — 按优先级排序的方向列表
    */
-  async analyze(e, t) {
-    if (e.length === 0 && (!t || t.length === 0))
-      return h.warn("[L2] 无板块/题材数据，返回空方向"), [];
-    const s = [];
-    for (const a of e) {
-      const u = this.calculateCompositeScore(a);
-      s.push({
-        name: a.name,
-        code: a.code,
-        changePercent: a.changePercent,
-        upRatio: a.upCount + a.downCount > 0 ? a.upCount / (a.upCount + a.downCount) : 0.5,
-        capitalFlow: a.capitalFlow,
-        compositeScore: u,
+  async analyze(sectors, topics) {
+    if (sectors.length === 0 && (!topics || topics.length === 0)) {
+      logger$1.warn("[L2] 无板块/题材数据，返回空方向");
+      return [];
+    }
+    const scored = [];
+    for (const sector of sectors) {
+      const score = this.calculateCompositeScore(sector);
+      scored.push({
+        name: sector.name,
+        code: sector.code,
+        changePercent: sector.changePercent,
+        upRatio: sector.upCount + sector.downCount > 0 ? sector.upCount / (sector.upCount + sector.downCount) : 0.5,
+        capitalFlow: sector.capitalFlow,
+        compositeScore: score,
         type: "sector"
       });
     }
-    if (t)
-      for (const a of t) {
-        const u = this.calculateTopicScore(a);
-        s.push({
-          name: a.name,
-          code: a.code,
-          changePercent: a.changePercent,
-          upRatio: a.upCount + a.downCount > 0 ? a.upCount / (a.upCount + a.downCount) : 0.5,
-          capitalFlow: a.capitalFlow,
-          compositeScore: u,
+    if (topics) {
+      for (const topic of topics) {
+        const score = this.calculateTopicScore(topic);
+        scored.push({
+          name: topic.name,
+          code: topic.code,
+          changePercent: topic.changePercent,
+          upRatio: topic.upCount + topic.downCount > 0 ? topic.upCount / (topic.upCount + topic.downCount) : 0.5,
+          capitalFlow: topic.capitalFlow,
+          compositeScore: score,
           type: "topic"
         });
       }
-    s.sort((a, u) => u.compositeScore - a.compositeScore);
-    const n = [], r = [];
-    for (const a of s.slice(0, 10))
-      a.compositeScore >= Le.MAIN_LINE ? this.isDuplicateDirection(n, a) || n.push(a) : a.compositeScore >= Le.SUB_LINE && (this.isDuplicateDirection(r, a) || r.push(a));
-    const o = [];
-    let c = 0;
-    for (const a of n.slice(0, 2))
-      c++, o.push({
-        mainLine: a.name,
-        subLine: c === 1 ? "主线核心" : "主线延伸/补涨",
+    }
+    scored.sort((a, b) => b.compositeScore - a.compositeScore);
+    const mainLines = [];
+    const subLines = [];
+    for (const d of scored.slice(0, 10)) {
+      if (d.compositeScore >= THRESHOLDS.MAIN_LINE) {
+        if (!this.isDuplicateDirection(mainLines, d)) {
+          mainLines.push(d);
+        }
+      } else if (d.compositeScore >= THRESHOLDS.SUB_LINE) {
+        if (!this.isDuplicateDirection(subLines, d)) {
+          subLines.push(d);
+        }
+      }
+    }
+    const results = [];
+    let rank = 0;
+    for (const d of mainLines.slice(0, 2)) {
+      rank++;
+      results.push({
+        mainLine: d.name,
+        subLine: rank === 1 ? "主线核心" : "主线延伸/补涨",
         recommendations: []
         // L3 分析后填充
       });
-    if (r.length > 0 && o.length < dt) {
-      const a = r[0];
-      o.push({
-        mainLine: a.name,
+    }
+    if (subLines.length > 0 && results.length < MAX_DIRECTIONS) {
+      const d = subLines[0];
+      results.push({
+        mainLine: d.name,
         subLine: "次线/轮动方向",
         recommendations: []
       });
     }
-    return o.length === 0 && o.push({
-      mainLine: "无明显主线",
-      subLine: "快速轮动/防守",
-      recommendations: []
-    }), h.debug("[L2] 方向分析结果:", {
-      analyzed: s.length,
-      mainLines: n.map((a) => `${a.name}(${a.compositeScore.toFixed(0)}分)`),
-      subLines: r.map((a) => `${a.name}(${a.compositeScore.toFixed(0)}分)`)
-    }), o;
+    if (results.length === 0) {
+      results.push({
+        mainLine: "无明显主线",
+        subLine: "快速轮动/防守",
+        recommendations: []
+      });
+    }
+    logger$1.debug("[L2] 方向分析结果:", {
+      analyzed: scored.length,
+      mainLines: mainLines.map((d) => `${d.name}(${d.compositeScore.toFixed(0)}分)`),
+      subLines: subLines.map((d) => `${d.name}(${d.compositeScore.toFixed(0)}分)`)
+    });
+    return results;
   }
   /**
    * 获取当前最强方向（仅返回第一条主线）
    * 用于快速判断方向偏好
    */
-  async getPrimaryDirection(e, t) {
-    const s = await this.analyze(e, t);
-    return s.length > 0 ? s[0] : null;
+  async getPrimaryDirection(sectors, topics) {
+    const directions = await this.analyze(sectors, topics);
+    return directions.length > 0 ? directions[0] : null;
   }
   // ─── 评分方法 ──────────────────────────────────────
   /**
    * 计算板块方向的综合评分 (0-100)
    */
-  calculateCompositeScore(e) {
-    const t = Math.max(0, Math.min(
+  calculateCompositeScore(sector) {
+    const changeScore = Math.max(0, Math.min(
       100,
-      30 + e.changePercent / 5 * 70
-    )), s = e.upCount + e.downCount, n = s > 0 ? e.upCount / s * 100 : 50, r = Math.max(0, Math.min(
-      100,
-      50 + e.capitalFlow / 1e5 * 50
-    )), o = Math.max(0, Math.min(
-      100,
-      50 + e.leadingChange / 10 * 50
+      30 + sector.changePercent / 5 * 70
     ));
-    return t * J.CHANGE + n * J.BREADTH + r * J.CAPITAL + o * J.LEADING;
+    const total = sector.upCount + sector.downCount;
+    const breadthScore = total > 0 ? sector.upCount / total * 100 : 50;
+    const capitalScore = Math.max(0, Math.min(
+      100,
+      50 + sector.capitalFlow / 1e5 * 50
+    ));
+    const leadingScore = Math.max(0, Math.min(
+      100,
+      50 + sector.leadingChange / 10 * 50
+    ));
+    return changeScore * WEIGHTS.CHANGE + breadthScore * WEIGHTS.BREADTH + capitalScore * WEIGHTS.CAPITAL + leadingScore * WEIGHTS.LEADING;
   }
   /**
    * 计算概念题材的综合评分 (0-100)
    * 概念数据结构与板块略有不同
    */
-  calculateTopicScore(e) {
-    const t = Math.max(0, Math.min(
+  calculateTopicScore(topic) {
+    const changeScore = Math.max(0, Math.min(
       100,
-      30 + e.changePercent / 5 * 70
-    )), s = e.upCount + e.downCount, n = s > 0 ? e.upCount / s * 100 : 50, r = Math.max(0, Math.min(
-      100,
-      50 + e.capitalFlow / 1e5 * 50
-    )), o = Math.max(0, Math.min(
-      100,
-      50 + e.leadingChange / 10 * 50
+      30 + topic.changePercent / 5 * 70
     ));
-    return t * 0.35 + n * 0.3 + r * 0.2 + o * 0.15;
+    const total = topic.upCount + topic.downCount;
+    const breadthScore = total > 0 ? topic.upCount / total * 100 : 50;
+    const capitalScore = Math.max(0, Math.min(
+      100,
+      50 + topic.capitalFlow / 1e5 * 50
+    ));
+    const leadingScore = Math.max(0, Math.min(
+      100,
+      50 + topic.leadingChange / 10 * 50
+    ));
+    return changeScore * 0.35 + breadthScore * 0.3 + capitalScore * 0.2 + leadingScore * 0.15;
   }
   // ─── 辅助方法 ──────────────────────────────────────
   /**
    * 检查是否为重复方向（名称相似的主题/板块去重）
    */
-  isDuplicateDirection(e, t) {
-    return e.some((s) => {
-      const n = s.name.replace(/[板块概念题材]/g, ""), r = t.name.replace(/[板块概念题材]/g, "");
-      return n.includes(r) || r.includes(n);
+  isDuplicateDirection(existing, candidate) {
+    return existing.some((d) => {
+      const nameA = d.name.replace(/[板块概念题材]/g, "");
+      const nameB = candidate.name.replace(/[板块概念题材]/g, "");
+      return nameA.includes(nameB) || nameB.includes(nameA);
     });
   }
 }
-const q = 9.8, yt = -9.8, S = {
+const LIMIT_UP_THRESHOLD = 9.8;
+const LIMIT_DOWN_THRESHOLD = -9.8;
+const TURNOVER = {
   LOW: 3,
   // <3% 低换手
   MEDIUM: 8,
@@ -783,7 +967,8 @@ const q = 9.8, yt = -9.8, S = {
   HIGH: 15
   // 8-15% 活跃换手
   // >15% 极高换手
-}, N = {
+};
+const AMPLITUDE = {
   // <3% 窄幅
   NORMAL: 6,
   // 3-6% 正常
@@ -791,7 +976,7 @@ const q = 9.8, yt = -9.8, S = {
   // 6-10% 宽幅
   // >10% 巨幅
 };
-class St {
+class L3StockAnalyzer {
   /**
    * 对一组股票进行五维评估
    *
@@ -802,21 +987,24 @@ class St {
    * @param sectors  - 板块行情（用于判断板块归属强度）
    * @returns StockAnalysisResult[]
    */
-  async analyze(e, t, s) {
-    if (e.length === 0) return [];
-    const n = this.getAvgMarketChange(t), r = this.buildSectorMap(s), o = [];
-    for (const c of e)
+  async analyze(quotes, indices, sectors) {
+    if (quotes.length === 0) return [];
+    const avgMarketChange = this.getAvgMarketChange(indices);
+    const sectorMap = this.buildSectorMap(sectors);
+    const results = [];
+    for (const quote of quotes) {
       try {
-        const a = this.analyzeSingle(
-          c,
-          n,
-          r
+        const result = this.analyzeSingle(
+          quote,
+          avgMarketChange,
+          sectorMap
         );
-        o.push(a);
-      } catch (a) {
-        h.warn(`[L3] 分析 ${c.code} 失败:`, a), o.push({
-          stock: c.name,
-          code: c.code,
+        results.push(result);
+      } catch (err) {
+        logger$1.warn(`[L3] 分析 ${quote.code} 失败:`, err);
+        results.push({
+          stock: quote.name,
+          code: quote.code,
           position: "数据不足",
           strength: "--",
           volumeAnalysis: "--",
@@ -825,22 +1013,29 @@ class St {
           buyPoint: "待定"
         });
       }
-    return h.debug(`[L3] 个股分析完成: ${o.length} 只`), o;
+    }
+    logger$1.debug(`[L3] 个股分析完成: ${results.length} 只`);
+    return results;
   }
   /**
    * 分析单只个股
    */
-  analyzeSingle(e, t, s) {
-    const n = this.assessPosition(e), r = this.assessStrength(e, t), o = this.assessVolumePrice(e), c = this.inferLogic(e), a = this.assessRisk(e), u = this.suggestBuyPoint(e, n);
+  analyzeSingle(quote, avgMarketChange, sectorMap) {
+    const position = this.assessPosition(quote);
+    const strength = this.assessStrength(quote, avgMarketChange);
+    const volumeAnalysis = this.assessVolumePrice(quote);
+    const logic = this.inferLogic(quote);
+    const risk = this.assessRisk(quote);
+    const buyPoint = this.suggestBuyPoint(quote, position);
     return {
-      stock: e.name,
-      code: e.code,
-      position: n,
-      strength: r,
-      volumeAnalysis: o,
-      logic: c,
-      risk: a,
-      buyPoint: u
+      stock: quote.name,
+      code: quote.code,
+      position,
+      strength,
+      volumeAnalysis,
+      logic,
+      risk,
+      buyPoint
     };
   }
   // ─── 位置评估 ──────────────────────────────────────
@@ -852,9 +1047,32 @@ class St {
    *   - 小涨 + 低换手 + 窄振幅 → "低位"
    *   - 大跌 + 放量 → "回调/破位"
    */
-  assessPosition(e) {
-    const { changePercent: t, turnoverRate: s, amplitude: n } = e;
-    return t >= q ? s > S.HIGH ? "放量涨停(高位)" : s > S.MEDIUM ? "涨停(中位)" : "缩量涨停(强势)" : t <= yt ? s > S.MEDIUM ? "放量跌停(危险)" : "跌停(弱势)" : t > 3 ? n > N.WIDE ? "宽幅上涨(突破区)" : n > N.NORMAL ? "震荡上涨(中位)" : "稳步上涨(趋势中)" : t > 0 ? s < S.LOW ? "缩量微涨(低位盘整)" : "温和上涨(中位)" : t > -3 ? s < S.LOW ? "缩量微跌(低位)" : "放量微跌(承压)" : s > S.MEDIUM ? "放量下跌(破位)" : "缩量下跌(回调)";
+  assessPosition(quote) {
+    const { changePercent, turnoverRate, amplitude } = quote;
+    if (changePercent >= LIMIT_UP_THRESHOLD) {
+      if (turnoverRate > TURNOVER.HIGH) return "放量涨停(高位)";
+      if (turnoverRate > TURNOVER.MEDIUM) return "涨停(中位)";
+      return "缩量涨停(强势)";
+    }
+    if (changePercent <= LIMIT_DOWN_THRESHOLD) {
+      if (turnoverRate > TURNOVER.MEDIUM) return "放量跌停(危险)";
+      return "跌停(弱势)";
+    }
+    if (changePercent > 3) {
+      if (amplitude > AMPLITUDE.WIDE) return "宽幅上涨(突破区)";
+      if (amplitude > AMPLITUDE.NORMAL) return "震荡上涨(中位)";
+      return "稳步上涨(趋势中)";
+    }
+    if (changePercent > 0) {
+      if (turnoverRate < TURNOVER.LOW) return "缩量微涨(低位盘整)";
+      return "温和上涨(中位)";
+    }
+    if (changePercent > -3) {
+      if (turnoverRate < TURNOVER.LOW) return "缩量微跌(低位)";
+      return "放量微跌(承压)";
+    }
+    if (turnoverRate > TURNOVER.MEDIUM) return "放量下跌(破位)";
+    return "缩量下跌(回调)";
   }
   // ─── 强度评估 ──────────────────────────────────────
   /**
@@ -865,64 +1083,151 @@ class St {
    *   - 个股涨幅 ≈ 大盘 → 中
    *   - 个股涨幅 < 大盘 -2% → 弱
    */
-  assessStrength(e, t) {
-    const s = e.changePercent - t;
-    return e.changePercent >= q ? "极强(涨停)" : s > 3 ? "强(远超大盘)" : s > 0 ? "偏强(强于大盘)" : s > -2 ? "中性(与大盘同步)" : s > -5 ? "偏弱(弱于大盘)" : "弱(远弱于大盘)";
+  assessStrength(quote, avgMarketChange) {
+    const relativeStrength = quote.changePercent - avgMarketChange;
+    if (quote.changePercent >= LIMIT_UP_THRESHOLD) return "极强(涨停)";
+    if (relativeStrength > 3) return "强(远超大盘)";
+    if (relativeStrength > 0) return "偏强(强于大盘)";
+    if (relativeStrength > -2) return "中性(与大盘同步)";
+    if (relativeStrength > -5) return "偏弱(弱于大盘)";
+    return "弱(远弱于大盘)";
   }
   // ─── 量价分析 ──────────────────────────────────────
   /**
    * 量价配合关系分析
    */
-  assessVolumePrice(e) {
-    const { changePercent: t, turnoverRate: s, amplitude: n } = e;
-    return t >= q ? s < S.LOW ? "缩量涨停(筹码锁定好)" : s < S.MEDIUM ? "温和放量涨停(健康)" : "放量涨停(分歧大)" : t > 3 ? s > S.HIGH ? "放量上攻(资金活跃)" : s > S.MEDIUM ? "量价配合(正常)" : "缩量上涨(抛压轻)" : t > 0 ? s > S.MEDIUM ? "放量滞涨(需警惕)" : "量平价稳(正常)" : t > -3 ? s > S.MEDIUM ? "放量滞跌(有承接)" : "缩量微跌(正常调整)" : s > S.MEDIUM ? "放量下跌(资金出逃)" : n > N.WIDE ? "宽幅震荡下跌(分歧)" : "缩量下跌(无人接盘)";
+  assessVolumePrice(quote) {
+    const { changePercent, turnoverRate, amplitude } = quote;
+    if (changePercent >= LIMIT_UP_THRESHOLD) {
+      if (turnoverRate < TURNOVER.LOW) return "缩量涨停(筹码锁定好)";
+      if (turnoverRate < TURNOVER.MEDIUM) return "温和放量涨停(健康)";
+      return "放量涨停(分歧大)";
+    }
+    if (changePercent > 3) {
+      if (turnoverRate > TURNOVER.HIGH) return "放量上攻(资金活跃)";
+      if (turnoverRate > TURNOVER.MEDIUM) return "量价配合(正常)";
+      return "缩量上涨(抛压轻)";
+    }
+    if (changePercent > 0) {
+      if (turnoverRate > TURNOVER.MEDIUM) return "放量滞涨(需警惕)";
+      return "量平价稳(正常)";
+    }
+    if (changePercent > -3) {
+      if (turnoverRate > TURNOVER.MEDIUM) return "放量滞跌(有承接)";
+      return "缩量微跌(正常调整)";
+    }
+    if (turnoverRate > TURNOVER.MEDIUM) return "放量下跌(资金出逃)";
+    if (amplitude > AMPLITUDE.WIDE) return "宽幅震荡下跌(分歧)";
+    return "缩量下跌(无人接盘)";
   }
   // ─── 逻辑推断（数据层面） ──────────────────────────
   /**
    * 基于数据推断可能的上涨逻辑
    * 具体逻辑需 LLM 补充，这里只做数据层面的提示
    */
-  inferLogic(e) {
-    const { changePercent: t, turnoverRate: s, amplitude: n } = e;
-    return t >= q ? "涨停 — 可能有消息/题材驱动，需 LLM 确认具体逻辑" : t > 5 ? "大幅上涨 — 资金主动买入，需 LLM 确认驱动因素" : t > 2 ? s > S.MEDIUM ? "放量上涨 — 资金介入明显，需 LLM 判断题材属性" : "温和上涨 — 趋势延续，需 LLM 判断逻辑强度" : Math.abs(t) <= 2 ? s < S.LOW ? "缩量整理 — 等待方向选择，需 LLM 判断中期逻辑" : "震荡 — 多空平衡，需 LLM 分析题材催化" : "下跌 — 需 LLM 判断是洗盘还是出货";
+  inferLogic(quote) {
+    const { changePercent, turnoverRate, amplitude } = quote;
+    if (changePercent >= LIMIT_UP_THRESHOLD) {
+      return "涨停 — 可能有消息/题材驱动，需 LLM 确认具体逻辑";
+    }
+    if (changePercent > 5) {
+      return "大幅上涨 — 资金主动买入，需 LLM 确认驱动因素";
+    }
+    if (changePercent > 2) {
+      if (turnoverRate > TURNOVER.MEDIUM) {
+        return "放量上涨 — 资金介入明显，需 LLM 判断题材属性";
+      }
+      return "温和上涨 — 趋势延续，需 LLM 判断逻辑强度";
+    }
+    if (Math.abs(changePercent) <= 2) {
+      if (turnoverRate < TURNOVER.LOW) {
+        return "缩量整理 — 等待方向选择，需 LLM 判断中期逻辑";
+      }
+      return "震荡 — 多空平衡，需 LLM 分析题材催化";
+    }
+    return "下跌 — 需 LLM 判断是洗盘还是出货";
   }
   // ─── 风险评估 ──────────────────────────────────────
   /**
    * 数据层面的风险识别
    */
-  assessRisk(e) {
-    const t = [], { changePercent: s, turnoverRate: n, amplitude: r, high: o, low: c, price: a } = e;
-    return s > 7 && t.push("短线涨幅已大，追高有回调风险"), n > S.HIGH && t.push("换手率过高，筹码松动"), r > N.WIDE && t.push("波动剧烈，多空分歧大"), s < -5 && t.push("趋势走弱，下方支撑不明"), s < -2 && n > S.MEDIUM && t.push("放量下跌，资金出逃"), s > 3 && n < S.LOW && t.push("缩量上涨，持续性存疑"), r > N.NORMAL && s < 0 && o > a * 1.03 && t.push("高开低走，抛压沉重"), t.length === 0 && t.push("大盘系统性风险"), t;
+  assessRisk(quote) {
+    const risks = [];
+    const { changePercent, turnoverRate, amplitude, high, low, price } = quote;
+    if (changePercent > 7) {
+      risks.push("短线涨幅已大，追高有回调风险");
+    }
+    if (turnoverRate > TURNOVER.HIGH) {
+      risks.push("换手率过高，筹码松动");
+    }
+    if (amplitude > AMPLITUDE.WIDE) {
+      risks.push("波动剧烈，多空分歧大");
+    }
+    if (changePercent < -5) {
+      risks.push("趋势走弱，下方支撑不明");
+    }
+    if (changePercent < -2 && turnoverRate > TURNOVER.MEDIUM) {
+      risks.push("放量下跌，资金出逃");
+    }
+    if (changePercent > 3 && turnoverRate < TURNOVER.LOW) {
+      risks.push("缩量上涨，持续性存疑");
+    }
+    if (amplitude > AMPLITUDE.NORMAL && changePercent < 0 && high > price * 1.03) {
+      risks.push("高开低走，抛压沉重");
+    }
+    if (risks.length === 0) {
+      risks.push("大盘系统性风险");
+    }
+    return risks;
   }
   // ─── 买入点位建议 ──────────────────────────────────
   /**
    * 基于当前位置和状态建议买入点位
    */
-  suggestBuyPoint(e, t) {
-    const { price: s, low: n, high: r } = e;
-    return t.includes("涨停") ? "打板确认/排板，不低吸" : t.includes("高位") || t.includes("突破") ? `回调至 ${n.toFixed(2)} 附近低吸` : t.includes("低位") || t.includes("盘整") ? `现价附近分批建仓 ${(s * 0.98).toFixed(2)}-${(s * 1.02).toFixed(2)}` : t.includes("回调") || t.includes("下跌") ? `等待企稳信号，关注 ${n.toFixed(2)} 支撑` : `现价 ${s} 附近观察`;
+  suggestBuyPoint(quote, position) {
+    const { price, low, high } = quote;
+    if (position.includes("涨停")) {
+      return `打板确认/排板，不低吸`;
+    }
+    if (position.includes("高位") || position.includes("突破")) {
+      return `回调至 ${low.toFixed(2)} 附近低吸`;
+    }
+    if (position.includes("低位") || position.includes("盘整")) {
+      return `现价附近分批建仓 ${(price * 0.98).toFixed(2)}-${(price * 1.02).toFixed(2)}`;
+    }
+    if (position.includes("回调") || position.includes("下跌")) {
+      return `等待企稳信号，关注 ${low.toFixed(2)} 支撑`;
+    }
+    return `现价 ${price} 附近观察`;
   }
   // ─── 辅助方法 ──────────────────────────────────────
   /** 获取大盘平均涨跌幅 */
-  getAvgMarketChange(e) {
-    return !e || e.length === 0 ? 0 : e.reduce((t, s) => t + s.changePercent, 0) / e.length;
+  getAvgMarketChange(indices) {
+    if (!indices || indices.length === 0) return 0;
+    return indices.reduce((sum, idx) => sum + idx.changePercent, 0) / indices.length;
   }
   /** 构建板块代码→涨跌幅 映射 */
-  buildSectorMap(e) {
-    const t = /* @__PURE__ */ new Map();
-    if (e)
-      for (const s of e)
-        t.set(s.code, s.changePercent);
-    return t;
+  buildSectorMap(sectors) {
+    const map = /* @__PURE__ */ new Map();
+    if (sectors) {
+      for (const s of sectors) {
+        map.set(s.code, s.changePercent);
+      }
+    }
+    return map;
   }
 }
-class Me extends Error {
-  constructor(e, t, s) {
-    super(e), this.rawText = t, this.parseStage = s, this.name = "L4ParseError";
+class L4ParseError extends Error {
+  constructor(message, rawText, parseStage) {
+    super(message);
+    this.rawText = rawText;
+    this.parseStage = parseStage;
+    this.name = "L4ParseError";
   }
 }
-const Ct = ["S", "A", "B", "C", "D"], wt = ["BUY", "COND_BUY", "WATCH", "NO_BUY"];
-class vt {
+const VALID_ENV_LEVELS = ["S", "A", "B", "C", "D"];
+const VALID_VERDICTS = ["BUY", "COND_BUY", "WATCH", "NO_BUY"];
+class L4ConclusionEngine {
   /**
    * 解析并处理 LLM 输出
    *
@@ -931,163 +1236,190 @@ class vt {
    * @returns 完整的 AnalysisResult
    * @throws L4ParseError 当 JSON 解析完全失败时
    */
-  async process(e, t) {
-    if (!e || e.trim().length === 0)
-      throw new Me("LLM 输出为空", e, "empty");
-    const s = this.cleanLLMOutput(e);
-    let n;
+  async process(llmOutput, fallback) {
+    if (!llmOutput || llmOutput.trim().length === 0) {
+      throw new L4ParseError("LLM 输出为空", llmOutput, "empty");
+    }
+    const cleaned = this.cleanLLMOutput(llmOutput);
+    let parsed;
     try {
-      n = JSON.parse(s);
-    } catch (l) {
-      const g = this.attemptJSONRepair(s);
-      if (g !== null)
-        n = g;
-      else
-        throw new Me(
-          `JSON 解析失败: ${l instanceof Error ? l.message : String(l)}`,
-          e,
+      parsed = JSON.parse(cleaned);
+    } catch (err) {
+      const repaired = this.attemptJSONRepair(cleaned);
+      if (repaired !== null) {
+        parsed = repaired;
+      } else {
+        throw new L4ParseError(
+          `JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`,
+          llmOutput,
           "json-parse"
         );
+      }
     }
-    const r = this.parseMarketEnv(n.marketEnv, t == null ? void 0 : t.envLevel), o = this.parseDirections(n.directions), c = this.parseStocks(n.stocks), a = this.parseConclusions(
-      n.conclusions,
-      t == null ? void 0 : t.stockCodes
+    const marketEnv = this.parseMarketEnv(parsed.marketEnv, fallback == null ? void 0 : fallback.envLevel);
+    const directions = this.parseDirections(parsed.directions);
+    const stocks = this.parseStocks(parsed.stocks);
+    const conclusions = this.parseConclusions(
+      parsed.conclusions,
+      fallback == null ? void 0 : fallback.stockCodes
     );
-    if (a.length === 0 && (t != null && t.stockCodes)) {
-      h.warn("[L4] LLM 未输出结论，使用 fallback");
-      for (const l of t.stockCodes)
-        a.push({
-          stockCode: l,
-          stockName: l,
+    if (conclusions.length === 0 && (fallback == null ? void 0 : fallback.stockCodes)) {
+      logger$1.warn("[L4] LLM 未输出结论，使用 fallback");
+      for (const code of fallback.stockCodes) {
+        conclusions.push({
+          stockCode: code,
+          stockName: code,
           verdict: "WATCH",
           reason: "LLM 未给出结论，默认观察",
           riskPoints: ["数据不足"],
           priority: 99
         });
+      }
     }
-    a.sort((l, g) => l.priority - g.priority), this.normalizePriorities(a);
-    const u = {
-      marketEnv: r,
-      directions: o,
-      stocks: c,
-      conclusions: a,
+    conclusions.sort((a, b) => a.priority - b.priority);
+    this.normalizePriorities(conclusions);
+    const result = {
+      marketEnv,
+      directions,
+      stocks,
+      conclusions,
       timestamp: Date.now()
     };
-    return h.debug("[L4] 结论处理完成:", {
-      envLevel: r.envLevel,
-      directions: o.length,
-      stocks: c.length,
-      conclusions: a.length,
-      buyCount: a.filter((l) => l.verdict === "BUY").length
-    }), u;
+    logger$1.debug("[L4] 结论处理完成:", {
+      envLevel: marketEnv.envLevel,
+      directions: directions.length,
+      stocks: stocks.length,
+      conclusions: conclusions.length,
+      buyCount: conclusions.filter((c) => c.verdict === "BUY").length
+    });
+    return result;
   }
   /**
    * 快速校验 LLM 输出是否为有效 JSON
    * 用于流式场景下的实时校验
    */
-  validateChunk(e) {
-    const t = this.cleanLLMOutput(e);
+  validateChunk(text) {
+    const cleaned = this.cleanLLMOutput(text);
     try {
-      const s = JSON.parse(t);
-      return !s || typeof s != "object" ? { valid: !1, reason: "非对象" } : { valid: !0 };
+      const parsed = JSON.parse(cleaned);
+      if (!parsed || typeof parsed !== "object") {
+        return { valid: false, reason: "非对象" };
+      }
+      return { valid: true };
     } catch {
-      return { valid: !1, reason: "JSON 语法错误" };
+      return { valid: false, reason: "JSON 语法错误" };
     }
   }
   // ─── 内部解析方法 ──────────────────────────────────
   /**
    * 解析市场环境部分
    */
-  parseMarketEnv(e, t) {
-    var c, a;
-    const s = {
-      envLevel: t ?? "B",
+  parseMarketEnv(raw, fallbackLevel) {
+    var _a2, _b;
+    const defaultResult = {
+      envLevel: fallbackLevel ?? "B",
       sentiment: "数据不足",
       suggestion: "等待数据更新"
     };
-    if (!e) return s;
-    const n = this.normalizeEnvLevel(e.envLevel) ?? s.envLevel, r = ((c = e.sentiment) == null ? void 0 : c.trim()) || s.sentiment, o = ((a = e.suggestion) == null ? void 0 : a.trim()) || s.suggestion;
-    return { envLevel: n, sentiment: r, suggestion: o };
+    if (!raw) return defaultResult;
+    const envLevel = this.normalizeEnvLevel(raw.envLevel) ?? defaultResult.envLevel;
+    const sentiment = ((_a2 = raw.sentiment) == null ? void 0 : _a2.trim()) || defaultResult.sentiment;
+    const suggestion = ((_b = raw.suggestion) == null ? void 0 : _b.trim()) || defaultResult.suggestion;
+    return { envLevel, sentiment, suggestion };
   }
   /**
    * 解析方向部分
    */
-  parseDirections(e) {
-    return !e || !Array.isArray(e) || e.length === 0 ? [] : e.filter((t) => t && t.mainLine).map((t) => ({
-      mainLine: t.mainLine ?? "未知方向",
-      subLine: t.subLine ?? "",
-      recommendations: Array.isArray(t.recommendations) ? t.recommendations : []
+  parseDirections(raw) {
+    if (!raw || !Array.isArray(raw) || raw.length === 0) {
+      return [];
+    }
+    return raw.filter((d) => d && d.mainLine).map((d) => ({
+      mainLine: d.mainLine ?? "未知方向",
+      subLine: d.subLine ?? "",
+      recommendations: Array.isArray(d.recommendations) ? d.recommendations : []
     }));
   }
   /**
    * 解析个股分析部分
    */
-  parseStocks(e) {
-    return !e || !Array.isArray(e) || e.length === 0 ? [] : e.filter((t) => t && (t.stock || t.code)).map((t) => ({
-      stock: t.stock ?? t.code ?? "未知",
-      code: t.code ?? "",
-      position: t.position ?? "--",
-      strength: t.strength ?? "--",
-      volumeAnalysis: t.volumeAnalysis ?? "--",
-      logic: t.logic ?? "--",
-      risk: Array.isArray(t.risk) ? t.risk : ["未知风险"],
-      buyPoint: t.buyPoint ?? "--"
+  parseStocks(raw) {
+    if (!raw || !Array.isArray(raw) || raw.length === 0) {
+      return [];
+    }
+    return raw.filter((s) => s && (s.stock || s.code)).map((s) => ({
+      stock: s.stock ?? s.code ?? "未知",
+      code: s.code ?? "",
+      position: s.position ?? "--",
+      strength: s.strength ?? "--",
+      volumeAnalysis: s.volumeAnalysis ?? "--",
+      logic: s.logic ?? "--",
+      risk: Array.isArray(s.risk) ? s.risk : ["未知风险"],
+      buyPoint: s.buyPoint ?? "--"
     }));
   }
   /**
    * 解析结论部分
    */
-  parseConclusions(e, t) {
-    var n;
-    if (!e || !Array.isArray(e) || e.length === 0)
+  parseConclusions(raw, stockCodes) {
+    var _a2;
+    if (!raw || !Array.isArray(raw) || raw.length === 0) {
       return [];
-    const s = [];
-    for (const r of e) {
-      if (!r || !r.stockCode && !r.stockName) continue;
-      const o = this.normalizeVerdict(r.verdict);
-      if (!o) {
-        h.warn(`[L4] 忽略无效 verdict: ${r.verdict}`);
+    }
+    const results = [];
+    for (const c of raw) {
+      if (!c || !c.stockCode && !c.stockName) continue;
+      const verdict = this.normalizeVerdict(c.verdict);
+      if (!verdict) {
+        logger$1.warn(`[L4] 忽略无效 verdict: ${c.verdict}`);
         continue;
       }
-      s.push({
-        stockCode: r.stockCode ?? r.stockName ?? "未知",
-        stockName: r.stockName ?? r.stockCode ?? "未知",
-        verdict: o,
-        reason: ((n = r.reason) == null ? void 0 : n.trim()) || "无说明",
-        riskPoints: Array.isArray(r.riskPoints) && r.riskPoints.length > 0 ? r.riskPoints : ["未指明风险"],
-        priority: typeof r.priority == "number" ? r.priority : 999
+      results.push({
+        stockCode: c.stockCode ?? c.stockName ?? "未知",
+        stockName: c.stockName ?? c.stockCode ?? "未知",
+        verdict,
+        reason: ((_a2 = c.reason) == null ? void 0 : _a2.trim()) || "无说明",
+        riskPoints: Array.isArray(c.riskPoints) && c.riskPoints.length > 0 ? c.riskPoints : ["未指明风险"],
+        priority: typeof c.priority === "number" ? c.priority : 999
       });
     }
-    return s;
+    return results;
   }
   // ─── 规范化 ──────────────────────────────────────────
   /** 规范化环境评级 */
-  normalizeEnvLevel(e) {
-    if (!e) return null;
-    const t = e.toUpperCase().trim();
-    return Ct.includes(t) ? t : null;
+  normalizeEnvLevel(value) {
+    if (!value) return null;
+    const upper = value.toUpperCase().trim();
+    return VALID_ENV_LEVELS.includes(upper) ? upper : null;
   }
   /** 规范化结论 */
-  normalizeVerdict(e) {
-    if (!e) return null;
-    const t = e.toUpperCase().trim();
-    return wt.includes(t) ? t : t.includes("BUY") || t.includes("买") ? "COND_BUY" : t.includes("WATCH") || t.includes("观") || t.includes("察") ? "WATCH" : t.includes("NO") || t.includes("不") || t.includes("放弃") ? "NO_BUY" : null;
+  normalizeVerdict(value) {
+    if (!value) return null;
+    const upper = value.toUpperCase().trim();
+    if (VALID_VERDICTS.includes(upper)) return upper;
+    if (upper.includes("BUY") || upper.includes("买")) return "COND_BUY";
+    if (upper.includes("WATCH") || upper.includes("观") || upper.includes("察")) return "WATCH";
+    if (upper.includes("NO") || upper.includes("不") || upper.includes("放弃")) return "NO_BUY";
+    return null;
   }
   /**
    * 规范化结论优先级
    * 确保：1) 连续无断档 2) BUY 最高优先级
    */
-  normalizePriorities(e) {
-    e.sort((s, n) => {
-      const r = this.verdictWeight(s.verdict), o = this.verdictWeight(n.verdict);
-      return r !== o ? r - o : (s.priority ?? 999) - (n.priority ?? 999);
-    }).forEach((s, n) => {
-      s.priority = n + 1;
+  normalizePriorities(conclusions) {
+    const prioritized = conclusions.sort((a, b) => {
+      const aWeight = this.verdictWeight(a.verdict);
+      const bWeight = this.verdictWeight(b.verdict);
+      if (aWeight !== bWeight) return aWeight - bWeight;
+      return (a.priority ?? 999) - (b.priority ?? 999);
+    });
+    prioritized.forEach((c, i) => {
+      c.priority = i + 1;
     });
   }
   /** 结论类型权重（用于排序） */
-  verdictWeight(e) {
-    switch (e) {
+  verdictWeight(verdict) {
+    switch (verdict) {
       case "BUY":
         return 1;
       case "COND_BUY":
@@ -1105,11 +1437,17 @@ class vt {
    * - 去除首尾空白
    * - 去除 BOM
    */
-  cleanLLMOutput(e) {
-    let t = e.trim();
-    t.charCodeAt(0) === 65279 && (t = t.slice(1));
-    const s = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    return s && (t = s[1].trim()), t = t.replace(/^```(?:json)?\s*/gm, "").replace(/```\s*$/gm, ""), t.trim();
+  cleanLLMOutput(text) {
+    let cleaned = text.trim();
+    if (cleaned.charCodeAt(0) === 65279) {
+      cleaned = cleaned.slice(1);
+    }
+    const jsonBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonBlockMatch) {
+      cleaned = jsonBlockMatch[1].trim();
+    }
+    cleaned = cleaned.replace(/^```(?:json)?\s*/gm, "").replace(/```\s*$/gm, "");
+    return cleaned.trim();
   }
   /**
    * 尝试修复常见 JSON 错误
@@ -1118,17 +1456,21 @@ class vt {
    * - 缺少引号的键名
    * - 注释
    */
-  attemptJSONRepair(e) {
-    let t = e;
-    t = t.replace(/\/\/.*$/gm, ""), t = t.replace(/\/\*[\s\S]*?\*\//g, ""), t = t.replace(/'/g, '"'), t = t.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/g, '$1"$2":'), t = t.replace(/,\s*([}\]])/g, "$1");
+  attemptJSONRepair(text) {
+    let repaired = text;
+    repaired = repaired.replace(/\/\/.*$/gm, "");
+    repaired = repaired.replace(/\/\*[\s\S]*?\*\//g, "");
+    repaired = repaired.replace(/'/g, '"');
+    repaired = repaired.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/g, '$1"$2":');
+    repaired = repaired.replace(/,\s*([}\]])/g, "$1");
     try {
-      return JSON.parse(t);
+      return JSON.parse(repaired);
     } catch {
       return null;
     }
   }
 }
-const ze = `你是一位A股短线交易决策助手，专注于A股沪深主板/创业板/科创板的短线交易机会识别。
+const SYSTEM_PROMPT = `你是一位A股短线交易决策助手，专注于A股沪深主板/创业板/科创板的短线交易机会识别。
 
 【核心定位】
 - 市场：A股沪深主板/创业板/科创板
@@ -1190,15 +1532,21 @@ const ze = `你是一位A股短线交易决策助手，专注于A股沪深主板
 5. 禁止跳过环境分析直接推荐个股
 6. 禁止不做优先级排序
 7. 禁止把判断责任推给用户`;
-function Et(i) {
-  const e = [ze];
-  return i != null && i.dynamicContext && e.push(`
+function buildFullSystemPrompt(options) {
+  const parts = [SYSTEM_PROMPT];
+  if (options == null ? void 0 : options.dynamicContext) {
+    parts.push(`
 
 【当前市场数据上下文】
-${i.dynamicContext}`), i != null && i.selectedStocks && e.push(`
+${options.dynamicContext}`);
+  }
+  if (options == null ? void 0 : options.selectedStocks) {
+    parts.push(`
 
 【待分析股票池】
-${i.selectedStocks}`), e.push(`
+${options.selectedStocks}`);
+  }
+  parts.push(`
 
 【输出 JSON Schema】
 你必须在分析完成后输出如下 JSON 结构（禁止加代码块标记，直接输出 JSON）：
@@ -1244,11 +1592,11 @@ ${i.selectedStocks}`), e.push(`
 - conclusions 数组必须按 priority 升序排列（1为最高优先级）
 - verdict 必须是 BUY / COND_BUY / WATCH / NO_BUY 其中之一
 - 每只分析票必须出现在 conclusions 中
-- riskPoints 不能为空数组（每只票至少1个风险点）`), e.join(`
-`);
+- riskPoints 不能为空数组（每只票至少1个风险点）`);
+  return parts.join("\n");
 }
-function At(i) {
-  const e = [
+function buildEnvOnlyPrompt(options) {
+  const parts = [
     `你是一位A股短线交易决策助手。请仅分析当前市场环境，不需要推荐个股。
 
 【要求】
@@ -1265,21 +1613,22 @@ function At(i) {
 
 禁止在 JSON 外套 markdown 代码块。`
   ];
-  return i != null && i.dynamicContext && e.push(`
+  if (options == null ? void 0 : options.dynamicContext) {
+    parts.push(`
 
 【当前市场数据】
-${i.dynamicContext}`), e.join(`
-`);
+${options.dynamicContext}`);
+  }
+  return parts.join("\n");
 }
-function pt(i) {
+function buildSingleStockPrompt(options) {
+  const envContext = (options == null ? void 0 : options.dynamicContext) ? `
+
+【当前市场数据】
+${options.dynamicContext}` : "\n\n【注意】未提供市场环境数据，请仅根据个股数据做技术面和基本面分析。";
   return `你是一位A股短线交易决策助手。请分析给定的单只股票。
 
-${i != null && i.dynamicContext ? `
-
-【当前市场数据】
-${i.dynamicContext}` : `
-
-【注意】未提供市场环境数据，请仅根据个股数据做技术面和基本面分析。`}
+${envContext}
 
 【输出 JSON Schema】
 {
@@ -1298,67 +1647,99 @@ ${i.dynamicContext}` : `
 
 禁止在 JSON 外套 markdown 代码块。`;
 }
-function te(i) {
-  return i.length === 0 ? "暂无大盘指数数据" : i.map((e) => `${e.changePercent >= 0 ? "📈" : "📉"} ${e.name}(${e.code}): ${e.price}点 ${e.changePercent >= 0 ? "+" : ""}${e.changePercent.toFixed(2)}% | 成交额 ${Fe(e.amount)}`).join(`
-`);
+function formatMarketIndex(indices) {
+  if (indices.length === 0) return "暂无大盘指数数据";
+  return indices.map((idx) => {
+    const direction = idx.changePercent >= 0 ? "📈" : "📉";
+    return `${direction} ${idx.name}(${idx.code}): ${idx.price}点 ${idx.changePercent >= 0 ? "+" : ""}${idx.changePercent.toFixed(2)}% | 成交额 ${formatAmount(idx.amount)}`;
+  }).join("\n");
 }
-function se(i) {
-  if (i.length === 0) return "暂无板块数据";
-  const e = i.slice(0, 5), t = e.map((s, n) => (s.changePercent >= 0, `  ${n + 1}. ${s.name}(${s.code}) ${s.changePercent >= 0 ? "+" : ""}${s.changePercent.toFixed(2)}% | 领涨:${s.leadingStock}(${s.leadingChange >= 0 ? "+" : ""}${s.leadingChange.toFixed(2)}%) | 涨${s.upCount}/跌${s.downCount} | 资金流:${Mt(s.capitalFlow)}`));
-  return `【板块表现 Top ${e.length}】
-${t.join(`
-`)}`;
+function formatSectors(sectors) {
+  if (sectors.length === 0) return "暂无板块数据";
+  const top5 = sectors.slice(0, 5);
+  const lines = top5.map((s, i) => {
+    s.changePercent >= 0 ? "📈" : "📉";
+    return `  ${i + 1}. ${s.name}(${s.code}) ${s.changePercent >= 0 ? "+" : ""}${s.changePercent.toFixed(2)}% | 领涨:${s.leadingStock}(${s.leadingChange >= 0 ? "+" : ""}${s.leadingChange.toFixed(2)}%) | 涨${s.upCount}/跌${s.downCount} | 资金流:${formatFundFlow(s.capitalFlow)}`;
+  });
+  return `【板块表现 Top ${top5.length}】
+${lines.join("\n")}`;
 }
-function Te(i) {
-  if (i.length === 0) return "暂无题材数据";
-  const e = i.slice(0, 5), t = e.map((s, n) => (s.changePercent >= 0, `  ${n + 1}. ${s.name}(${s.code}) ${s.changePercent >= 0 ? "+" : ""}${s.changePercent.toFixed(2)}% | 领涨:${s.leadingStock} | 涨${s.upCount}/跌${s.downCount}`));
-  return `【热门题材 Top ${e.length}】
-${t.join(`
-`)}`;
+function formatHotTopics(topics) {
+  if (topics.length === 0) return "暂无题材数据";
+  const top5 = topics.slice(0, 5);
+  const lines = top5.map((t, i) => {
+    t.changePercent >= 0 ? "📈" : "📉";
+    return `  ${i + 1}. ${t.name}(${t.code}) ${t.changePercent >= 0 ? "+" : ""}${t.changePercent.toFixed(2)}% | 领涨:${t.leadingStock} | 涨${t.upCount}/跌${t.downCount}`;
+  });
+  return `【热门题材 Top ${top5.length}】
+${lines.join("\n")}`;
 }
-function ke(i) {
-  return i.length === 0 ? "暂无个股数据" : i.map((e) => `${e.changePercent >= 0 ? "📈" : "📉"} ${e.name}(${e.code}): ¥${e.price} ${e.changePercent >= 0 ? "+" : ""}${e.changePercent.toFixed(2)}% | 量:${(e.volume / 1e4).toFixed(1)}万手 | 额:${Fe(e.turnover)} | 换手:${e.turnoverRate.toFixed(1)}% | 振幅:${e.amplitude.toFixed(1)}% | 高低:${e.high}/${e.low}`).join(`
-`);
+function formatStockQuotes(quotes) {
+  if (quotes.length === 0) return "暂无个股数据";
+  return quotes.map((q) => {
+    const dir = q.changePercent >= 0 ? "📈" : "📉";
+    return `${dir} ${q.name}(${q.code}): ¥${q.price} ${q.changePercent >= 0 ? "+" : ""}${q.changePercent.toFixed(2)}% | 量:${(q.volume / 1e4).toFixed(1)}万手 | 额:${formatAmount(q.turnover)} | 换手:${q.turnoverRate.toFixed(1)}% | 振幅:${q.amplitude.toFixed(1)}% | 高低:${q.high}/${q.low}`;
+  }).join("\n");
 }
-class Lt {
+class PromptBuilder {
   /**
    * 组装完整分析 Prompt（四层全量分析）
    *
    * @param data - 当前市场数据
    * @returns messages 数组，可直接传给 DeepSeekClient.chat()
    */
-  buildAnalysisPrompt(e) {
-    var a;
-    const t = [];
-    e.indices && e.indices.length > 0 && t.push(te(e.indices)), e.sectors && e.sectors.length > 0 && t.push(se(e.sectors)), e.topics && e.topics.length > 0 && t.push(Te(e.topics)), e.quotes && e.quotes.length > 0 && t.push(`【个股行情】
-${ke(e.quotes)}`);
-    const s = t.join(`
-
-`), n = e.stocksToAnalyze ? e.stocksToAnalyze.map((u) => `${u.name}(${u.code})`).join("、") : "", r = n ? `请分析以下股票：${n}` : void 0, o = Et({
-      dynamicContext: s || void 0,
-      selectedStocks: r
-    }), c = this.buildUserAnalysisPrompt(
-      e.stocksToAnalyze ?? [],
-      (a = e.indices) != null && a.length ? "已有市场数据" : "无市场数据"
+  buildAnalysisPrompt(data) {
+    var _a2;
+    const contextParts = [];
+    if (data.indices && data.indices.length > 0) {
+      contextParts.push(formatMarketIndex(data.indices));
+    }
+    if (data.sectors && data.sectors.length > 0) {
+      contextParts.push(formatSectors(data.sectors));
+    }
+    if (data.topics && data.topics.length > 0) {
+      contextParts.push(formatHotTopics(data.topics));
+    }
+    if (data.quotes && data.quotes.length > 0) {
+      contextParts.push(`【个股行情】
+${formatStockQuotes(data.quotes)}`);
+    }
+    const dynamicContext = contextParts.join("\n\n");
+    const stockListStr = data.stocksToAnalyze ? data.stocksToAnalyze.map((s) => `${s.name}(${s.code})`).join("、") : "";
+    const selectedStocks = stockListStr ? `请分析以下股票：${stockListStr}` : void 0;
+    const systemPrompt = buildFullSystemPrompt({
+      dynamicContext: dynamicContext || void 0,
+      selectedStocks
+    });
+    const userPrompt = this.buildUserAnalysisPrompt(
+      data.stocksToAnalyze ?? [],
+      ((_a2 = data.indices) == null ? void 0 : _a2.length) ? "已有市场数据" : "无市场数据"
     );
     return [
-      { role: "system", content: o },
-      { role: "user", content: c }
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
     ];
   }
   /**
    * 构建环境诊断 Prompt（仅 L1 层面）
    */
-  buildEnvCheckPrompt(e) {
-    const t = [];
-    e.indices && e.indices.length > 0 && t.push(te(e.indices)), e.sectors && e.sectors.length > 0 && t.push(se(e.sectors)), e.topics && e.topics.length > 0 && t.push(Te(e.topics));
-    const s = t.join(`
-
-`);
+  buildEnvCheckPrompt(data) {
+    const contextParts = [];
+    if (data.indices && data.indices.length > 0) {
+      contextParts.push(formatMarketIndex(data.indices));
+    }
+    if (data.sectors && data.sectors.length > 0) {
+      contextParts.push(formatSectors(data.sectors));
+    }
+    if (data.topics && data.topics.length > 0) {
+      contextParts.push(formatHotTopics(data.topics));
+    }
+    const dynamicContext = contextParts.join("\n\n");
+    const systemPrompt = buildEnvOnlyPrompt({
+      dynamicContext: dynamicContext || void 0
+    });
     return [
-      { role: "system", content: At({
-        dynamicContext: s || void 0
-      }) },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
         content: "请基于以上市场数据分析当前市场环境，输出环境评级、情绪描述和仓位建议。"
@@ -1368,74 +1749,92 @@ ${ke(e.quotes)}`);
   /**
    * 构建单票快速分析 Prompt
    */
-  buildSingleStockPrompt(e) {
-    const t = [];
-    e.indices && e.indices.length > 0 && t.push(te(e.indices)), e.sectors && e.sectors.length > 0 && t.push(se(e.sectors)), t.push(
+  buildSingleStockPrompt(data) {
+    const contextParts = [];
+    if (data.indices && data.indices.length > 0) {
+      contextParts.push(formatMarketIndex(data.indices));
+    }
+    if (data.sectors && data.sectors.length > 0) {
+      contextParts.push(formatSectors(data.sectors));
+    }
+    contextParts.push(
       `【目标个股】
-${ke([e.quote])}`
+${formatStockQuotes([data.quote])}`
     );
-    const s = t.join(`
-
-`);
+    const dynamicContext = contextParts.join("\n\n");
+    const systemPrompt = buildSingleStockPrompt({
+      dynamicContext
+    });
     return [
-      { role: "system", content: pt({
-        dynamicContext: s
-      }) },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: `请详细分析 ${e.quote.name}(${e.quote.code})，输出完整的五维评估和交易结论。`
+        content: `请详细分析 ${data.quote.name}(${data.quote.code})，输出完整的五维评估和交易结论。`
       }
     ];
   }
   /**
    * 内部：构建 User Prompt（分析指令部分）
    */
-  buildUserAnalysisPrompt(e, t) {
-    const s = e.map(
-      (n, r) => `  ${r + 1}. ${n.name}(${n.code})`
+  buildUserAnalysisPrompt(stocksToAnalyze, marketDataStatus) {
+    const stockLines = stocksToAnalyze.map(
+      (s, i) => `  ${i + 1}. ${s.name}(${s.code})`
     );
-    return e.length === 0 ? "请分析当前市场环境，并给出交易建议。" : [
-      `请严格按照四层分析框架，分析以下股票池中的 ${e.length} 只股票：`,
+    if (stocksToAnalyze.length === 0) {
+      return "请分析当前市场环境，并给出交易建议。";
+    }
+    return [
+      `请严格按照四层分析框架，分析以下股票池中的 ${stocksToAnalyze.length} 只股票：`,
       "",
-      s.join(`
-`),
+      stockLines.join("\n"),
       "",
-      `市场数据状态: ${t}`,
+      `市场数据状态: ${marketDataStatus}`,
       "",
       "要求:",
       "- 先分析市场环境 (L1)",
       "- 再判断主线方向 (L2)",
       "- 再逐只个股五维评估 (L3)",
       "- 最后输出四类结论并排序 (L4)"
-    ].join(`
-`);
+    ].join("\n");
   }
   // ─── 工具方法 ──────────────────────────────────────
   /**
    * 组合多段 context 文本
    */
-  static joinContext(...e) {
-    return e.filter(Boolean).join(`
-
-`);
+  static joinContext(...parts) {
+    return parts.filter(Boolean).join("\n\n");
   }
   /**
    * 从用户输入文本中提取股票代码
    * 支持格式: "600519"、"贵州茅台"、"600519贵州茅台"、"600519,000858"
    */
-  static extractStocks(e) {
-    const t = /\b\d{6}\b/g, s = e.match(t);
-    return s ? [...new Set(s)] : [];
+  static extractStocks(input) {
+    const codePattern = /\b\d{6}\b/g;
+    const codes = input.match(codePattern);
+    if (codes) {
+      return [...new Set(codes)];
+    }
+    return [];
   }
 }
-function Fe(i) {
-  return i >= 1e8 ? `${(i / 1e8).toFixed(1)}亿` : i >= 1e4 ? `${(i / 1e4).toFixed(1)}万` : `${i.toFixed(0)}元`;
+function formatAmount(yuan) {
+  if (yuan >= 1e8) {
+    return `${(yuan / 1e8).toFixed(1)}亿`;
+  }
+  if (yuan >= 1e4) {
+    return `${(yuan / 1e4).toFixed(1)}万`;
+  }
+  return `${yuan.toFixed(0)}元`;
 }
-function Mt(i) {
-  const e = Math.abs(i), t = i >= 0 ? "+" : "-";
-  return e >= 1e4 ? `${t}${(e / 1e4).toFixed(2)}亿` : `${t}${e.toFixed(0)}万`;
+function formatFundFlow(wanYuan) {
+  const abs = Math.abs(wanYuan);
+  const prefix = wanYuan >= 0 ? "+" : "-";
+  if (abs >= 1e4) {
+    return `${prefix}${(abs / 1e4).toFixed(2)}亿`;
+  }
+  return `${prefix}${abs.toFixed(0)}万`;
 }
-const A = {
+const DEFAULT_CONFIG$2 = {
   BASE_URL: "https://api.deepseek.com/v1",
   MODEL: "deepseek-chat",
   MAX_TOKENS: 4096,
@@ -1448,160 +1847,214 @@ const A = {
   RETRY_BASE_DELAY: 1e3,
   RETRY_MAX_DELAY: 1e4
 };
-class D extends Error {
-  constructor(e, t, s, n = !1) {
-    super(e), this.code = t, this.statusCode = s, this.retryable = n, this.name = "LLMError";
+class LLMError extends Error {
+  constructor(message, code, statusCode, retryable = false) {
+    super(message);
+    this.code = code;
+    this.statusCode = statusCode;
+    this.retryable = retryable;
+    this.name = "LLMError";
   }
 }
-class U extends D {
-  constructor(e, t, s) {
-    super(e, "API_ERROR", t, t >= 500), this.body = s, this.name = "APIError";
+class APIError extends LLMError {
+  constructor(message, statusCode, body) {
+    super(message, "API_ERROR", statusCode, statusCode >= 500);
+    this.body = body;
+    this.name = "APIError";
   }
 }
-class _e extends D {
-  constructor(e) {
+class TimeoutError extends LLMError {
+  constructor(timeoutMs) {
     super(
-      `请求超时 (${e}ms)`,
+      `请求超时 (${timeoutMs}ms)`,
       "TIMEOUT",
       void 0,
-      !0
+      true
       // 超时可重试
-    ), this.name = "TimeoutError";
+    );
+    this.name = "TimeoutError";
   }
 }
-class I extends D {
-  constructor(e, t) {
-    super(e, "STREAM_ERROR", void 0, !1), this.rawLine = t, this.name = "StreamError";
+class StreamError extends LLMError {
+  constructor(message, rawLine) {
+    super(message, "STREAM_ERROR", void 0, false);
+    this.rawLine = rawLine;
+    this.name = "StreamError";
   }
 }
-class ae extends D {
-  constructor(e = "API Key 无效或未配置") {
-    super(e, "AUTH_ERROR", 401, !1), this.name = "AuthError";
+class AuthError extends LLMError {
+  constructor(message = "API Key 无效或未配置") {
+    super(message, "AUTH_ERROR", 401, false);
+    this.name = "AuthError";
   }
 }
-class Tt extends D {
-  constructor(e = 6e4) {
+class RateLimitError extends LLMError {
+  constructor(retryAfterMs = 6e4) {
     super(
-      `API 速率限制，建议等待 ${e}ms`,
+      `API 速率限制，建议等待 ${retryAfterMs}ms`,
       "RATE_LIMIT",
       429,
-      !0
-    ), this.retryAfterMs = e, this.name = "RateLimitError";
+      true
+    );
+    this.retryAfterMs = retryAfterMs;
+    this.name = "RateLimitError";
   }
 }
-function $e(i) {
-  const e = i.trim();
-  if (!e || e.startsWith(":"))
+function parseLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith(":")) {
     return { type: "skip" };
-  if (e.startsWith("data: ")) {
-    const t = e.slice(6);
-    return t === "[DONE]" ? { type: "done" } : { type: "data", value: t };
   }
-  if (e.startsWith("data:")) {
-    const t = e.slice(5);
-    return t === "[DONE]" ? { type: "done" } : { type: "data", value: t };
+  if (trimmed.startsWith("data: ")) {
+    const value = trimmed.slice(6);
+    if (value === "[DONE]") {
+      return { type: "done" };
+    }
+    return { type: "data", value };
   }
-  return e.startsWith("event: ") ? { type: "event", value: e.slice(7) } : { type: "skip" };
+  if (trimmed.startsWith("data:")) {
+    const value = trimmed.slice(5);
+    if (value === "[DONE]") {
+      return { type: "done" };
+    }
+    return { type: "data", value };
+  }
+  if (trimmed.startsWith("event: ")) {
+    return { type: "event", value: trimmed.slice(7) };
+  }
+  return { type: "skip" };
 }
-function Pe(i) {
+function parseChunkJson(raw) {
   try {
-    const e = JSON.parse(i);
-    return e && typeof e == "object" && Array.isArray(e.choices) ? e : (h.warn("[Stream] 收到非标准 chunk 结构:", i.slice(0, 200)), null);
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.choices)) {
+      return parsed;
+    }
+    logger$1.warn("[Stream] 收到非标准 chunk 结构:", raw.slice(0, 200));
+    return null;
   } catch {
-    return h.warn("[Stream] JSON 解析失败:", i.slice(0, 200)), null;
+    logger$1.warn("[Stream] JSON 解析失败:", raw.slice(0, 200));
+    return null;
   }
 }
-async function kt(i, e, t) {
-  var y, p, M, fe, ge, me, de, ye;
-  const { onChunk: s, onDone: n, onError: r } = e;
-  let o = "", c = "", a = "", u = 0, l = "stop";
-  if (t != null && t.aborted) {
-    const v = new I("流已被外部中止");
-    throw r == null || r(v), v;
+async function readStream(response, callbacks, signal) {
+  var _a2, _b, _c, _d, _e, _f, _g, _h;
+  const { onChunk, onDone, onError } = callbacks;
+  let fullContent = "";
+  let id = "";
+  let model = "";
+  let created = 0;
+  let finishReason = "stop";
+  if (signal == null ? void 0 : signal.aborted) {
+    const err = new StreamError("流已被外部中止");
+    onError == null ? void 0 : onError(err);
+    throw err;
   }
-  const g = (y = i.body) == null ? void 0 : y.getReader();
-  if (!g) {
-    const v = new I("响应体不可读（body 为 null）");
-    throw r == null || r(v), v;
+  const reader = (_a2 = response.body) == null ? void 0 : _a2.getReader();
+  if (!reader) {
+    const err = new StreamError("响应体不可读（body 为 null）");
+    onError == null ? void 0 : onError(err);
+    throw err;
   }
-  const m = new TextDecoder();
-  let d = "";
+  const decoder = new TextDecoder();
+  let buffer = "";
   try {
-    for (; ; ) {
-      if (t != null && t.aborted) {
-        const F = new I("流已被外部中止");
-        throw r == null || r(F), F;
+    while (true) {
+      if (signal == null ? void 0 : signal.aborted) {
+        const err = new StreamError("流已被外部中止");
+        onError == null ? void 0 : onError(err);
+        throw err;
       }
-      const { done: k, value: E } = await g.read();
-      if (k) break;
-      const z = m.decode(E, { stream: !0 });
-      d += z;
-      const Se = d.split(`
-`);
-      d = Se.pop() ?? "";
-      for (const F of Se) {
-        const K = $e(F);
-        switch (K.type) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const result = parseLine(line);
+        switch (result.type) {
           case "skip":
             break;
           case "done":
-            l = "stop";
+            finishReason = "stop";
             break;
           case "data": {
-            const T = Pe(K.value);
-            if (!T) break;
-            !c && T.id && (c = T.id), !a && T.model && (a = T.model), !u && T.created && (u = T.created);
-            const j = (p = T.choices) == null ? void 0 : p[0];
-            if (j) {
-              const Ce = ((M = j.delta) == null ? void 0 : M.content) ?? "";
-              Ce && (o += Ce), j.finish_reason && (l = j.finish_reason);
+            const chunk = parseChunkJson(result.value);
+            if (!chunk) break;
+            if (!id && chunk.id) id = chunk.id;
+            if (!model && chunk.model) model = chunk.model;
+            if (!created && chunk.created) created = chunk.created;
+            const choice = (_b = chunk.choices) == null ? void 0 : _b[0];
+            if (choice) {
+              const delta = ((_c = choice.delta) == null ? void 0 : _c.content) ?? "";
+              if (delta) {
+                fullContent += delta;
+              }
+              if (choice.finish_reason) {
+                finishReason = choice.finish_reason;
+              }
             }
-            s == null || s(T, o);
+            onChunk == null ? void 0 : onChunk(chunk, fullContent);
             break;
           }
           case "event":
-            h.debug("[Stream] SSE event:", K.value);
+            logger$1.debug("[Stream] SSE event:", result.value);
             break;
           case "error":
-            h.warn("[Stream] 行解析警告:", K.message);
+            logger$1.warn("[Stream] 行解析警告:", result.message);
             break;
         }
       }
     }
-    if (d.trim()) {
-      const k = $e(d);
-      if (k.type === "data") {
-        const E = Pe(k.value);
-        if (E) {
-          const z = ((me = (ge = (fe = E.choices) == null ? void 0 : fe[0]) == null ? void 0 : ge.delta) == null ? void 0 : me.content) ?? "";
-          z && (o += z), (ye = (de = E.choices) == null ? void 0 : de[0]) != null && ye.finish_reason && (l = E.choices[0].finish_reason), !c && E.id && (c = E.id), !a && E.model && (a = E.model), !u && E.created && (u = E.created), s == null || s(E, o);
+    if (buffer.trim()) {
+      const result = parseLine(buffer);
+      if (result.type === "data") {
+        const chunk = parseChunkJson(result.value);
+        if (chunk) {
+          const delta = ((_f = (_e = (_d = chunk.choices) == null ? void 0 : _d[0]) == null ? void 0 : _e.delta) == null ? void 0 : _f.content) ?? "";
+          if (delta) fullContent += delta;
+          if ((_h = (_g = chunk.choices) == null ? void 0 : _g[0]) == null ? void 0 : _h.finish_reason) {
+            finishReason = chunk.choices[0].finish_reason;
+          }
+          if (!id && chunk.id) id = chunk.id;
+          if (!model && chunk.model) model = chunk.model;
+          if (!created && chunk.created) created = chunk.created;
+          onChunk == null ? void 0 : onChunk(chunk, fullContent);
         }
-      } else k.type === "done" && (l = "stop");
+      } else if (result.type === "done") {
+        finishReason = "stop";
+      }
     }
-    const v = {
-      fullContent: o,
-      id: c,
-      model: a,
-      created: u,
-      finishReason: l
+    const streamResult = {
+      fullContent,
+      id,
+      model,
+      created,
+      finishReason
     };
-    return n == null || n(v), v;
-  } catch (v) {
-    if (v instanceof I)
-      throw r == null || r(v), v;
-    if (v instanceof DOMException && v.name === "AbortError") {
-      const E = new I("流读取被中止");
-      throw r == null || r(E), E;
+    onDone == null ? void 0 : onDone(streamResult);
+    return streamResult;
+  } catch (error) {
+    if (error instanceof StreamError) {
+      onError == null ? void 0 : onError(error);
+      throw error;
     }
-    const k = new I(
-      v instanceof Error ? v.message : "流读取未知错误"
+    if (error instanceof DOMException && error.name === "AbortError") {
+      const err2 = new StreamError("流读取被中止");
+      onError == null ? void 0 : onError(err2);
+      throw err2;
+    }
+    const err = new StreamError(
+      error instanceof Error ? error.message : "流读取未知错误"
     );
-    throw r == null || r(k), k;
+    onError == null ? void 0 : onError(err);
+    throw err;
   } finally {
-    g.releaseLock();
+    reader.releaseLock();
   }
 }
-class _t {
+class StorageKeyManager {
   constructor() {
     this.cachedKey = null;
   }
@@ -1610,51 +2063,59 @@ class _t {
    * 优先级: 1) 构造函数传入 2) 硬编码 Key 3) 环境变量 fallback
    */
   async getKey() {
-    var e;
+    var _a2;
     if (this.cachedKey) return this.cachedKey;
     try {
-      const t = (e = globalThis == null ? void 0 : globalThis.process) == null ? void 0 : e.env, s = t == null ? void 0 : t.DEEPSEEK_API_KEY;
-      if (s && s.trim())
-        return this.cachedKey = s.trim(), this.cachedKey;
+      const env = (_a2 = globalThis == null ? void 0 : globalThis.process) == null ? void 0 : _a2.env;
+      const envKey = env == null ? void 0 : env.DEEPSEEK_API_KEY;
+      if (envKey && envKey.trim()) {
+        this.cachedKey = envKey.trim();
+        return this.cachedKey;
+      }
     } catch {
     }
-    throw new ae("API Key 未配置。请在环境变量 DEEPSEEK_API_KEY 中设置，或更新 llm/client.ts 中的 HARDCODED_API_KEY。");
+    throw new AuthError("API Key 未配置。请在环境变量 DEEPSEEK_API_KEY 中设置，或更新 llm/client.ts 中的 HARDCODED_API_KEY。");
   }
   /** 设置 API Key */
-  async setKey(e) {
-    const t = e.trim();
-    if (!t)
-      throw new ae("API Key 不能为空");
-    this.cachedKey = t, h.info("[KeyManager] API Key 已更新");
+  async setKey(key) {
+    const trimmed = key.trim();
+    if (!trimmed) {
+      throw new AuthError("API Key 不能为空");
+    }
+    this.cachedKey = trimmed;
+    logger$1.info("[KeyManager] API Key 已更新");
   }
   /** 清除 API Key */
   async clearKey() {
-    this.cachedKey = null, h.info("[KeyManager] API Key 已清除");
+    this.cachedKey = null;
+    logger$1.info("[KeyManager] API Key 已清除");
   }
   /** 检查是否已配置 Key */
   async hasKey() {
     try {
-      return (await this.getKey()).length > 0;
+      const key = await this.getKey();
+      return key.length > 0;
     } catch {
-      return !1;
+      return false;
     }
   }
 }
-class Ke {
-  constructor(e) {
-    this.keyManager = new _t(), this.config = {
-      baseUrl: A.BASE_URL,
-      model: A.MODEL,
-      maxTokens: A.MAX_TOKENS,
-      temperature: A.TEMPERATURE,
-      timeout: A.TIMEOUT,
-      ...e
+class DeepSeekClient {
+  constructor(config) {
+    this.keyManager = new StorageKeyManager();
+    this.config = {
+      baseUrl: DEFAULT_CONFIG$2.BASE_URL,
+      model: DEFAULT_CONFIG$2.MODEL,
+      maxTokens: DEFAULT_CONFIG$2.MAX_TOKENS,
+      temperature: DEFAULT_CONFIG$2.TEMPERATURE,
+      timeout: DEFAULT_CONFIG$2.TIMEOUT,
+      ...config
     };
   }
   // ─── 配置 ──────────────────────────────────────────
   /** 更新客户端配置 */
-  setConfig(e) {
-    this.config = { ...this.config, ...e };
+  setConfig(partial) {
+    this.config = { ...this.config, ...partial };
   }
   /** 获取 KeyManager 引用 */
   getKeyManager() {
@@ -1663,224 +2124,272 @@ class Ke {
   // ─── 内部工具 ──────────────────────────────────────
   /** 构建请求头 */
   async buildHeaders() {
+    const apiKey = this.config.apiKey || await this.keyManager.getKey();
     return {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${this.config.apiKey || await this.keyManager.getKey()}`
+      Authorization: `Bearer ${apiKey}`
     };
   }
   /** 构建请求体 */
-  buildRequest(e, t) {
+  buildRequest(messages, options) {
     return {
-      model: this.config.model ?? A.MODEL,
-      messages: e,
-      stream: (t == null ? void 0 : t.stream) ?? !1,
-      max_tokens: this.config.maxTokens ?? A.MAX_TOKENS,
-      temperature: this.config.temperature ?? A.TEMPERATURE
+      model: this.config.model ?? DEFAULT_CONFIG$2.MODEL,
+      messages,
+      stream: (options == null ? void 0 : options.stream) ?? false,
+      max_tokens: this.config.maxTokens ?? DEFAULT_CONFIG$2.MAX_TOKENS,
+      temperature: this.config.temperature ?? DEFAULT_CONFIG$2.TEMPERATURE
     };
   }
   /** 构建完整 messages（插入 system prompt） */
-  buildMessages(e) {
+  buildMessages(userMessages) {
     return [
-      { role: "system", content: ze },
-      ...e.map((t) => ({ role: t.role, content: t.content }))
+      { role: "system", content: SYSTEM_PROMPT },
+      ...userMessages.map((m) => ({ role: m.role, content: m.content }))
     ];
   }
   /** 处理 HTTP 响应错误 → 抛出类型化错误 */
-  async handleResponseError(e) {
-    const t = e.status;
-    let s = "";
+  async handleResponseError(response) {
+    const status = response.status;
+    let bodyText = "";
     try {
-      s = await e.text();
+      bodyText = await response.text();
     } catch {
-      s = "(无法读取响应体)";
+      bodyText = "(无法读取响应体)";
     }
-    if (t === 401)
-      throw new ae(
-        s.includes("Incorrect API key") ? "API Key 错误，请检查设置" : "API 认证失败"
+    if (status === 401) {
+      throw new AuthError(
+        bodyText.includes("Incorrect API key") ? "API Key 错误，请检查设置" : "API 认证失败"
       );
-    if (t === 429) {
-      const n = e.headers.get("retry-after-ms") ? parseInt(e.headers.get("retry-after-ms"), 10) : e.headers.get("Retry-After") ? parseInt(e.headers.get("Retry-After"), 10) * 1e3 : void 0;
-      throw new Tt(n);
     }
-    throw t >= 400 && t < 500 ? new U(
-      `请求被拒绝 (${t}): ${s.slice(0, 300)}`,
-      t,
-      s
-    ) : t >= 500 ? new U(
-      `DeepSeek 服务端错误 (${t})`,
-      t,
-      s
-    ) : new U(`HTTP ${t}: ${s.slice(0, 200)}`, t, s);
+    if (status === 429) {
+      const retryAfter = response.headers.get("retry-after-ms") ? parseInt(response.headers.get("retry-after-ms"), 10) : response.headers.get("Retry-After") ? parseInt(response.headers.get("Retry-After"), 10) * 1e3 : void 0;
+      throw new RateLimitError(retryAfter);
+    }
+    if (status >= 400 && status < 500) {
+      throw new APIError(
+        `请求被拒绝 (${status}): ${bodyText.slice(0, 300)}`,
+        status,
+        bodyText
+      );
+    }
+    if (status >= 500) {
+      throw new APIError(
+        `DeepSeek 服务端错误 (${status})`,
+        status,
+        bodyText
+      );
+    }
+    throw new APIError(`HTTP ${status}: ${bodyText.slice(0, 200)}`, status, bodyText);
   }
   // ─── 非流式调用 ────────────────────────────────────
-  async chat(e, t) {
-    const s = (t == null ? void 0 : t.timeout) ?? this.config.timeout ?? A.TIMEOUT, n = this.buildMessages(e), r = this.buildRequest(n, { stream: !1 });
-    return h.debug("[DeepSeek] 非流式请求:", {
-      model: r.model,
-      messages: r.messages.length,
-      maxTokens: r.max_tokens
-    }), Ne(async () => {
-      var l, g, m, d;
-      const c = new AbortController(), a = setTimeout(() => c.abort(), s), u = t != null && t.signal ? De(t.signal, c.signal) : c.signal;
+  async chat(messages, options) {
+    const timeoutMs = (options == null ? void 0 : options.timeout) ?? this.config.timeout ?? DEFAULT_CONFIG$2.TIMEOUT;
+    const allMessages = this.buildMessages(messages);
+    const body = this.buildRequest(allMessages, { stream: false });
+    logger$1.debug("[DeepSeek] 非流式请求:", {
+      model: body.model,
+      messages: body.messages.length,
+      maxTokens: body.max_tokens
+    });
+    const execute = async () => {
+      var _a2, _b, _c, _d;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const combinedSignal = (options == null ? void 0 : options.signal) ? combineSignals(options.signal, controller.signal) : controller.signal;
       try {
-        const y = await this.buildHeaders(), p = await fetch(
-          `${this.config.baseUrl ?? A.BASE_URL}/chat/completions`,
+        const headers = await this.buildHeaders();
+        const response = await fetch(
+          `${this.config.baseUrl ?? DEFAULT_CONFIG$2.BASE_URL}/chat/completions`,
           {
             method: "POST",
-            headers: y,
-            body: JSON.stringify(r),
-            signal: u
+            headers,
+            body: JSON.stringify(body),
+            signal: combinedSignal
           }
         );
-        p.ok || await this.handleResponseError(p);
-        const M = await p.json();
-        return h.debug("[DeepSeek] 非流式响应:", {
-          id: M.id,
-          model: M.model,
-          usage: M.usage,
-          contentLength: ((d = (m = (g = (l = M.choices) == null ? void 0 : l[0]) == null ? void 0 : g.message) == null ? void 0 : m.content) == null ? void 0 : d.length) ?? 0
-        }), M;
-      } catch (y) {
-        throw y instanceof D ? y : y instanceof DOMException && y.name === "AbortError" ? new _e(s) : new U(
-          y instanceof Error ? y.message : "未知请求错误",
+        if (!response.ok) {
+          await this.handleResponseError(response);
+        }
+        const data = await response.json();
+        logger$1.debug("[DeepSeek] 非流式响应:", {
+          id: data.id,
+          model: data.model,
+          usage: data.usage,
+          contentLength: ((_d = (_c = (_b = (_a2 = data.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) == null ? void 0 : _d.length) ?? 0
+        });
+        return data;
+      } catch (error) {
+        if (error instanceof LLMError) throw error;
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw new TimeoutError(timeoutMs);
+        }
+        throw new APIError(
+          error instanceof Error ? error.message : "未知请求错误",
           0
         );
       } finally {
-        clearTimeout(a);
+        clearTimeout(timeoutId);
       }
-    }, {
-      maxRetries: (t == null ? void 0 : t.retries) ?? A.MAX_RETRIES,
-      baseDelay: (t == null ? void 0 : t.retryBaseDelay) ?? A.RETRY_BASE_DELAY,
-      maxDelay: (t == null ? void 0 : t.retryMaxDelay) ?? A.RETRY_MAX_DELAY,
-      onRetry: (c, a) => {
-        h.warn(
-          `[DeepSeek] 请求重试 #${a + 1} 原因: ${c.message}`
+    };
+    return withRetry(execute, {
+      maxRetries: (options == null ? void 0 : options.retries) ?? DEFAULT_CONFIG$2.MAX_RETRIES,
+      baseDelay: (options == null ? void 0 : options.retryBaseDelay) ?? DEFAULT_CONFIG$2.RETRY_BASE_DELAY,
+      maxDelay: (options == null ? void 0 : options.retryMaxDelay) ?? DEFAULT_CONFIG$2.RETRY_MAX_DELAY,
+      onRetry: (error, attempt) => {
+        logger$1.warn(
+          `[DeepSeek] 请求重试 #${attempt + 1} 原因: ${error.message}`
         );
       }
     });
   }
-  async ask(e, t) {
-    var n, r, o;
-    return ((o = (r = (n = (await this.chat(
-      [{ role: "user", content: e }],
-      t
-    )).choices) == null ? void 0 : n[0]) == null ? void 0 : r.message) == null ? void 0 : o.content) ?? "";
+  async ask(userMessage, options) {
+    var _a2, _b, _c;
+    const response = await this.chat(
+      [{ role: "user", content: userMessage }],
+      options
+    );
+    return ((_c = (_b = (_a2 = response.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) ?? "";
   }
   // ─── 流式调用 ────────────────────────────────────
-  async chatStream(e, t, s) {
-    const n = (s == null ? void 0 : s.timeout) ?? this.config.timeout ?? A.STREAM_TIMEOUT, r = this.buildMessages(e), o = this.buildRequest(r, { stream: !0 });
-    h.debug("[DeepSeek] 流式请求:", {
-      model: o.model,
-      messages: o.messages.length
+  async chatStream(messages, callbacks, options) {
+    const timeoutMs = (options == null ? void 0 : options.timeout) ?? this.config.timeout ?? DEFAULT_CONFIG$2.STREAM_TIMEOUT;
+    const allMessages = this.buildMessages(messages);
+    const body = this.buildRequest(allMessages, { stream: true });
+    logger$1.debug("[DeepSeek] 流式请求:", {
+      model: body.model,
+      messages: body.messages.length
     });
-    const c = new AbortController(), a = setTimeout(() => c.abort(), n), u = s != null && s.signal ? De(s.signal, c.signal) : c.signal;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const combinedSignal = (options == null ? void 0 : options.signal) ? combineSignals(options.signal, controller.signal) : controller.signal;
     try {
-      const l = await this.buildHeaders(), g = await fetch(
-        `${this.config.baseUrl ?? A.BASE_URL}/chat/completions`,
+      const headers = await this.buildHeaders();
+      const response = await fetch(
+        `${this.config.baseUrl ?? DEFAULT_CONFIG$2.BASE_URL}/chat/completions`,
         {
           method: "POST",
-          headers: l,
-          body: JSON.stringify(o),
-          signal: u
+          headers,
+          body: JSON.stringify(body),
+          signal: combinedSignal
         }
       );
-      return g.ok || (clearTimeout(a), await this.handleResponseError(g)), await kt(
-        g,
+      if (!response.ok) {
+        clearTimeout(timeoutId);
+        await this.handleResponseError(response);
+      }
+      return await readStream(
+        response,
         {
-          onChunk: (m, d) => {
-            var y;
-            (y = t == null ? void 0 : t.onChunk) == null || y.call(t, m, d);
+          onChunk: (chunk, accumulated) => {
+            var _a2;
+            (_a2 = callbacks == null ? void 0 : callbacks.onChunk) == null ? void 0 : _a2.call(callbacks, chunk, accumulated);
           },
-          onDone: (m) => {
-            var d;
-            h.debug("[DeepSeek] 流完成:", {
-              id: m.id,
-              model: m.model,
-              contentLength: m.fullContent.length,
-              finishReason: m.finishReason
-            }), (d = t == null ? void 0 : t.onDone) == null || d.call(t, m);
+          onDone: (result) => {
+            var _a2;
+            logger$1.debug("[DeepSeek] 流完成:", {
+              id: result.id,
+              model: result.model,
+              contentLength: result.fullContent.length,
+              finishReason: result.finishReason
+            });
+            (_a2 = callbacks == null ? void 0 : callbacks.onDone) == null ? void 0 : _a2.call(callbacks, result);
           },
-          onError: (m) => {
-            var d;
-            h.error("[DeepSeek] 流错误:", m.message), (d = t == null ? void 0 : t.onError) == null || d.call(t, m);
+          onError: (error) => {
+            var _a2;
+            logger$1.error("[DeepSeek] 流错误:", error.message);
+            (_a2 = callbacks == null ? void 0 : callbacks.onError) == null ? void 0 : _a2.call(callbacks, error);
           }
         },
-        u
+        combinedSignal
       );
-    } catch (l) {
-      throw l instanceof D ? l : l instanceof DOMException && l.name === "AbortError" ? new _e(n) : new U(
-        l instanceof Error ? l.message : "流式请求未知错误",
+    } catch (error) {
+      if (error instanceof LLMError) throw error;
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new TimeoutError(timeoutMs);
+      }
+      throw new APIError(
+        error instanceof Error ? error.message : "流式请求未知错误",
         0
       );
     } finally {
-      clearTimeout(a);
+      clearTimeout(timeoutId);
     }
   }
-  async askStream(e, t, s) {
+  async askStream(userMessage, callbacks, options) {
     return this.chatStream(
-      [{ role: "user", content: e }],
-      t,
-      s
+      [{ role: "user", content: userMessage }],
+      callbacks,
+      options
     );
   }
 }
-function De(...i) {
-  const e = new AbortController();
-  for (const t of i) {
-    if (t.aborted)
-      return e.abort(t.reason), e.signal;
-    t.addEventListener(
+function combineSignals(...signals) {
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return controller.signal;
+    }
+    signal.addEventListener(
       "abort",
-      () => e.abort(t.reason),
-      { once: !0 }
+      () => controller.abort(signal.reason),
+      { once: true }
     );
   }
-  return e.signal;
+  return controller.signal;
 }
-new Ke();
-const C = {
+new DeepSeekClient();
+const KEY_AREA = {
   api_key: "sync",
   settings: "sync",
   watchlist: "local",
   history: "local"
-}, $ = {
+};
+const DEFAULT_SETTINGS$1 = {
   model: "deepseek-chat",
   temperature: 0.7,
   maxTokens: 4096,
-  autoAnalyze: !1,
+  autoAnalyze: false,
   maxConcurrent: 3,
-  debugMode: !1
-}, ne = {
+  debugMode: false
+};
+const DEFAULTS = {
   api_key: "",
-  settings: { ...$ },
+  settings: { ...DEFAULT_SETTINGS$1 },
   watchlist: [],
   history: []
-}, re = {
+};
+const META_KEYS = {
   VERSION: "meta_version",
   INSTALLED_AT: "meta_installed_at",
   LAST_ANALYSIS_AT: "meta_last_analysis_at",
   MIGRATED: "meta_migrated"
 };
-class Q extends Error {
-  constructor(e, t, s) {
-    super(e), this.code = t, this.key = s, this.name = "StorageError";
+class StorageError extends Error {
+  constructor(message, code, key) {
+    super(message);
+    this.code = code;
+    this.key = key;
+    this.name = "StorageError";
   }
 }
-class be extends Q {
-  constructor(e, t, s) {
+class QuotaExceededError extends StorageError {
+  constructor(key, sizeBytes, limitBytes) {
     super(
-      `存储配额超限: "${e}" 大小 ${t}B 超过限制 ${s}B`,
+      `存储配额超限: "${key}" 大小 ${sizeBytes}B 超过限制 ${limitBytes}B`,
       "QUOTA_EXCEEDED",
-      e
-    ), this.name = "QuotaExceededError";
+      key
+    );
+    this.name = "QuotaExceededError";
   }
 }
-class L extends Q {
-  constructor(e, t) {
-    super(`值校验失败: "${e}" — ${t}`, "VALIDATION", e), this.name = "ValidationError";
+class ValidationError extends StorageError {
+  constructor(key, reason) {
+    super(`值校验失败: "${key}" — ${reason}`, "VALIDATION", key);
+    this.name = "ValidationError";
   }
 }
-class $t {
+class StorageManager {
   // ═══════════════════════════════════════════════
   // 构造 & 初始化
   // ═══════════════════════════════════════════════
@@ -1889,7 +2398,13 @@ class $t {
    * 不自动初始化 —— 首次调用任意方法时会自动初始化
    */
   constructor() {
-    this.memoryCache = /* @__PURE__ */ new Map(), this.memorySync = /* @__PURE__ */ new Map(), this.memoryLocal = /* @__PURE__ */ new Map(), this.initialized = !1, this.initPromise = null, this.changeListeners = /* @__PURE__ */ new Map(), this.onChangeBound = !1;
+    this.memoryCache = /* @__PURE__ */ new Map();
+    this.memorySync = /* @__PURE__ */ new Map();
+    this.memoryLocal = /* @__PURE__ */ new Map();
+    this.initialized = false;
+    this.initPromise = null;
+    this.changeListeners = /* @__PURE__ */ new Map();
+    this.onChangeBound = false;
   }
   /**
    * 初始化存储
@@ -1898,23 +2413,30 @@ class $t {
    *
    * 幂等，可重复调用
    */
-  async init(e) {
-    if (!(this.initialized && !(e != null && e.force))) {
-      if (this.initPromise) return this.initPromise;
-      this.initPromise = this.doInit();
-      try {
-        await this.initPromise;
-      } finally {
-        this.initPromise = null;
-      }
+  async init(options) {
+    if (this.initialized && !(options == null ? void 0 : options.force)) return;
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = this.doInit();
+    try {
+      await this.initPromise;
+    } finally {
+      this.initPromise = null;
     }
   }
   async doInit() {
-    this.onChangeBound || this.bindOnChange(), await this.ensureDefaults(), await this.warmCache(), this.initialized = !0, h.info("[StorageManager] 初始化完成");
+    if (!this.onChangeBound) {
+      this.bindOnChange();
+    }
+    await this.ensureDefaults();
+    await this.warmCache();
+    this.initialized = true;
+    logger$1.info("[StorageManager] 初始化完成");
   }
   /** 确保初始化（所有公开方法先调用此方法） */
   async ensureInit() {
-    this.initialized || await this.init();
+    if (!this.initialized) {
+      await this.init();
+    }
   }
   // ═══════════════════════════════════════════════
   // 核心读写
@@ -1935,17 +2457,21 @@ class $t {
    * const history = await storage.get('history');
    * ```
    */
-  async get(e, t) {
+  async get(key, area) {
     await this.ensureInit();
-    const s = this.memoryCache.get(e);
-    if (s !== void 0)
-      return s;
-    const n = t ?? this.resolveArea(e);
+    const cached = this.memoryCache.get(key);
+    if (cached !== void 0) {
+      return cached;
+    }
+    const storageArea = area ?? this.resolveArea(key);
     try {
-      const c = (await this.getChromeStorage(n).get(e))[e];
-      return this.memoryCache.set(e, c), c ?? this.getDefault(e);
-    } catch (r) {
-      throw this.wrapError(r, "读取失败", e);
+      const storage = this.getChromeStorage(storageArea);
+      const result = await storage.get(key);
+      const value = result[key];
+      this.memoryCache.set(key, value);
+      return value ?? this.getDefault(key);
+    } catch (err) {
+      throw this.wrapError(err, "读取失败", key);
     }
   }
   /**
@@ -1956,20 +2482,30 @@ class $t {
    * const { api_key, settings } = await storage.getMany(['api_key', 'settings']);
    * ```
    */
-  async getMany(e) {
+  async getMany(keys) {
     await this.ensureInit();
-    const t = {}, s = [], n = [];
-    for (const a of e)
-      this.resolveArea(a) === "sync" ? s.push(a) : n.push(a);
-    const [r, o] = await Promise.all([
-      s.length > 0 ? this.getChromeStorage("sync").get(s) : Promise.resolve({}),
-      n.length > 0 ? this.getChromeStorage("local").get(n) : Promise.resolve({})
-    ]), c = { ...r, ...o };
-    for (const a of e) {
-      const u = c[a] ?? this.getDefault(a);
-      t[a] = u, this.memoryCache.set(a, u);
+    const result = {};
+    const syncKeys = [];
+    const localKeys = [];
+    for (const key of keys) {
+      const area = this.resolveArea(key);
+      if (area === "sync") {
+        syncKeys.push(key);
+      } else {
+        localKeys.push(key);
+      }
     }
-    return t;
+    const [syncResult, localResult] = await Promise.all([
+      syncKeys.length > 0 ? this.getChromeStorage("sync").get(syncKeys) : Promise.resolve({}),
+      localKeys.length > 0 ? this.getChromeStorage("local").get(localKeys) : Promise.resolve({})
+    ]);
+    const merged = { ...syncResult, ...localResult };
+    for (const key of keys) {
+      const value = merged[key] ?? this.getDefault(key);
+      result[key] = value;
+      this.memoryCache.set(key, value);
+    }
+    return result;
   }
   /**
    * 写入指定键的值
@@ -1984,14 +2520,23 @@ class $t {
    * @throws {QuotaExceededError} sync 区域超出配额
    * @throws {ValidationError}    值校验失败
    */
-  async set(e, t, s) {
-    await this.ensureInit(), this.validateValue(e, t);
-    const n = s ?? this.resolveArea(e);
-    n === "sync" && this.checkSyncQuota(e, t);
+  async set(key, value, area) {
+    await this.ensureInit();
+    this.validateValue(key, value);
+    const storageArea = area ?? this.resolveArea(key);
+    if (storageArea === "sync") {
+      this.checkSyncQuota(key, value);
+    }
     try {
-      await this.getChromeStorage(n).set({ [e]: t }), this.memoryCache.set(e, t), h.debug(`[StorageManager] 已写入: ${e} → ${n}`);
-    } catch (r) {
-      throw r instanceof Error && r.message.includes("QUOTA_BYTES_PER_ITEM") ? new be(e, this.estimateSize(t), 8192) : this.wrapError(r, "写入失败", e);
+      const storage = this.getChromeStorage(storageArea);
+      await storage.set({ [key]: value });
+      this.memoryCache.set(key, value);
+      logger$1.debug(`[StorageManager] 已写入: ${key} → ${storageArea}`);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("QUOTA_BYTES_PER_ITEM")) {
+        throw new QuotaExceededError(key, this.estimateSize(value), 8192);
+      }
+      throw this.wrapError(err, "写入失败", key);
     }
   }
   /**
@@ -2007,15 +2552,26 @@ class $t {
    * });
    * ```
    */
-  async setMany(e) {
+  async setMany(entries) {
     await this.ensureInit();
-    const t = {}, s = {};
-    for (const [n, r] of Object.entries(e))
-      this.validateValue(n, r), this.resolveArea(n) === "sync" ? (this.checkSyncQuota(n, r), t[n] = r) : s[n] = r, this.memoryCache.set(n, r);
+    const syncPayload = {};
+    const localPayload = {};
+    for (const [key, value] of Object.entries(entries)) {
+      this.validateValue(key, value);
+      const area = this.resolveArea(key);
+      if (area === "sync") {
+        this.checkSyncQuota(key, value);
+        syncPayload[key] = value;
+      } else {
+        localPayload[key] = value;
+      }
+      this.memoryCache.set(key, value);
+    }
     await Promise.all([
-      Object.keys(t).length > 0 ? this.getChromeStorage("sync").set(t) : Promise.resolve(),
-      Object.keys(s).length > 0 ? this.getChromeStorage("local").set(s) : Promise.resolve()
-    ]), h.debug(`[StorageManager] 批量写入完成: sync=${Object.keys(t).length}, local=${Object.keys(s).length}`);
+      Object.keys(syncPayload).length > 0 ? this.getChromeStorage("sync").set(syncPayload) : Promise.resolve(),
+      Object.keys(localPayload).length > 0 ? this.getChromeStorage("local").set(localPayload) : Promise.resolve()
+    ]);
+    logger$1.debug(`[StorageManager] 批量写入完成: sync=${Object.keys(syncPayload).length}, local=${Object.keys(localPayload).length}`);
   }
   /**
    * 删除指定键
@@ -2023,13 +2579,16 @@ class $t {
    * @param key  - 要删除的键
    * @param area - 可选，显式指定存储区域
    */
-  async remove(e, t) {
+  async remove(key, area) {
     await this.ensureInit();
-    const s = t ?? this.resolveArea(e);
+    const storageArea = area ?? this.resolveArea(key);
     try {
-      await this.getChromeStorage(s).remove(e), this.memoryCache.delete(e), h.debug(`[StorageManager] 已删除: ${e}`);
-    } catch (n) {
-      throw this.wrapError(n, "删除失败", e);
+      const storage = this.getChromeStorage(storageArea);
+      await storage.remove(key);
+      this.memoryCache.delete(key);
+      logger$1.debug(`[StorageManager] 已删除: ${key}`);
+    } catch (err) {
+      throw this.wrapError(err, "删除失败", key);
     }
   }
   /**
@@ -2042,28 +2601,36 @@ class $t {
    */
   async clear() {
     await this.ensureInit();
-    const e = Object.keys(C).filter(
-      (n) => C[n] === "sync"
-    ), t = [
-      ...Object.keys(C).filter((n) => C[n] === "local"),
+    const syncKeys = Object.keys(KEY_AREA).filter(
+      (k) => KEY_AREA[k] === "sync"
+    );
+    const localKeys = [
+      ...Object.keys(KEY_AREA).filter((k) => KEY_AREA[k] === "local"),
       ...this.collectCacheKeys(),
       ...this.collectMetaKeys()
     ];
     await Promise.all([
-      this.getChromeStorage("sync").remove(e),
-      this.getChromeStorage("local").remove(t)
-    ]), this.memoryCache.clear(), this.initialized = !1;
-    const s = [...e, ...t];
-    return h.info(`[StorageManager] 存储已清空: ${s.length} 个键`), s;
+      this.getChromeStorage("sync").remove(syncKeys),
+      this.getChromeStorage("local").remove(localKeys)
+    ]);
+    this.memoryCache.clear();
+    this.initialized = false;
+    const allKeys = [...syncKeys, ...localKeys];
+    logger$1.info(`[StorageManager] 存储已清空: ${allKeys.length} 个键`);
+    return allKeys;
   }
   /**
    * 检查键是否存在
    */
-  async has(e) {
-    if (await this.ensureInit(), this.memoryCache.has(e))
-      return this.memoryCache.get(e) !== void 0;
-    const t = this.resolveArea(e);
-    return (await this.getChromeStorage(t).get(e))[e] !== void 0;
+  async has(key) {
+    await this.ensureInit();
+    if (this.memoryCache.has(key)) {
+      return this.memoryCache.get(key) !== void 0;
+    }
+    const area = this.resolveArea(key);
+    const storage = this.getChromeStorage(area);
+    const result = await storage.get(key);
+    return result[key] !== void 0;
   }
   // ═══════════════════════════════════════════════
   // 默认值管理
@@ -2071,54 +2638,62 @@ class $t {
   /**
    * 获取指定键的默认值
    */
-  getDefault(e) {
-    if (e in ne) {
-      const t = ne[e];
-      return Dt(t);
+  getDefault(key) {
+    if (key in DEFAULTS) {
+      const def = DEFAULTS[key];
+      return deepClone(def);
     }
-    if (e.startsWith("cache_"))
+    if (key.startsWith("cache_")) {
       return null;
-    e.startsWith("meta_");
+    }
+    if (key.startsWith("meta_")) {
+      return void 0;
+    }
+    return void 0;
   }
   /**
    * 重置指定键为默认值
    */
-  async resetToDefault(e) {
-    const t = this.getDefault(e);
-    await this.set(e, t), h.info(`[StorageManager] 已重置为默认值: ${e}`);
+  async resetToDefault(key) {
+    const defaultValue = this.getDefault(key);
+    await this.set(key, defaultValue);
+    logger$1.info(`[StorageManager] 已重置为默认值: ${key}`);
   }
   /**
    * 重置所有键为默认值
    */
   async resetAll() {
-    const e = {};
-    for (const t of Object.keys(ne))
-      e[t] = this.getDefault(t);
-    await this.setMany(e), h.info("[StorageManager] 所有键已重置为默认值");
+    const entries = {};
+    for (const key of Object.keys(DEFAULTS)) {
+      entries[key] = this.getDefault(key);
+    }
+    await this.setMany(entries);
+    logger$1.info("[StorageManager] 所有键已重置为默认值");
   }
   /**
    * 获取所有已知键的当前值（含默认值回退）
    */
   async getAll() {
-    const e = Object.keys(C);
-    return await this.getMany(e);
+    const keys = Object.keys(KEY_AREA);
+    const result = await this.getMany(keys);
+    return result;
   }
   /**
    * 获取当前存储使用统计
    */
   async getStorageInfo() {
-    const [e, t] = await Promise.all([
+    const [syncBytes, localBytes] = await Promise.all([
       this.getChromeStorage("sync").getBytesInUse(null),
       this.getChromeStorage("local").getBytesInUse(null)
     ]);
     return {
       sync: {
-        keys: Object.keys(C).filter((s) => C[s] === "sync").length,
-        bytes: e
+        keys: Object.keys(KEY_AREA).filter((k) => KEY_AREA[k] === "sync").length,
+        bytes: syncBytes
       },
       local: {
-        keys: Object.keys(C).filter((s) => C[s] === "local").length,
-        bytes: t
+        keys: Object.keys(KEY_AREA).filter((k) => KEY_AREA[k] === "local").length,
+        bytes: localBytes
       }
     };
   }
@@ -2137,13 +2712,14 @@ class $t {
    * await storage.setCache('sectors', sectorData, 60_000);
    * ```
    */
-  async setCache(e, t, s = 3e4) {
-    const n = {
-      data: t,
+  async setCache(name, data, ttl = 3e4) {
+    const entry = {
+      data,
       timestamp: Date.now(),
-      ttl: s
-    }, r = `cache_${e}`;
-    await this.set(r, n, "local");
+      ttl
+    };
+    const key = `cache_${name}`;
+    await this.set(key, entry, "local");
   }
   /**
    * 读取缓存条目
@@ -2158,17 +2734,23 @@ class $t {
    * if (sectors) { /* 使用缓存 * / }
    * ```
    */
-  async getCache(e) {
-    const t = `cache_${e}`, s = await this.get(t, "local");
-    return s ? Date.now() - s.timestamp > s.ttl ? (await this.remove(t, "local").catch(() => {
-    }), null) : s.data : null;
+  async getCache(name) {
+    const key = `cache_${name}`;
+    const entry = await this.get(key, "local");
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      await this.remove(key, "local").catch(() => {
+      });
+      return null;
+    }
+    return entry.data;
   }
   /**
    * 删除指定缓存
    */
-  async removeCache(e) {
-    const t = `cache_${e}`;
-    await this.remove(t, "local");
+  async removeCache(name) {
+    const key = `cache_${name}`;
+    await this.remove(key, "local");
   }
   /**
    * 清除所有过期缓存
@@ -2176,15 +2758,23 @@ class $t {
    * @returns 被清除的缓存数量
    */
   async clearExpiredCache() {
-    const e = this.collectCacheKeys();
-    let t = 0;
-    for (const s of e)
+    const cacheKeys = this.collectCacheKeys();
+    let cleared = 0;
+    for (const key of cacheKeys) {
       try {
-        const n = s, r = await this.get(n, "local");
-        r && Date.now() - r.timestamp > r.ttl && (await this.remove(n, "local"), t++);
+        const cacheKey = key;
+        const entry = await this.get(cacheKey, "local");
+        if (entry && Date.now() - entry.timestamp > entry.ttl) {
+          await this.remove(cacheKey, "local");
+          cleared++;
+        }
       } catch {
       }
-    return t > 0 && h.info(`[StorageManager] 已清除 ${t} 条过期缓存`), t;
+    }
+    if (cleared > 0) {
+      logger$1.info(`[StorageManager] 已清除 ${cleared} 条过期缓存`);
+    }
+    return cleared;
   }
   /**
    * 清除所有缓存（无论是否过期）
@@ -2192,27 +2782,38 @@ class $t {
    * @returns 被清除的缓存数量
    */
   async clearAllCache() {
-    const e = this.collectCacheKeys();
-    if (e.length > 0) {
-      await this.getChromeStorage("local").remove(e);
-      for (const t of e)
-        this.memoryCache.delete(t);
+    const cacheKeys = this.collectCacheKeys();
+    if (cacheKeys.length > 0) {
+      await this.getChromeStorage("local").remove(cacheKeys);
+      for (const key of cacheKeys) {
+        this.memoryCache.delete(key);
+      }
     }
-    return h.info(`[StorageManager] 已清除全部缓存: ${e.length} 条`), e.length;
+    logger$1.info(`[StorageManager] 已清除全部缓存: ${cacheKeys.length} 条`);
+    return cacheKeys.length;
   }
   /**
    * 获取缓存统计信息
    */
   async getCacheStats() {
-    const e = this.collectCacheKeys();
-    let t = 0, s = 0;
-    for (const n of e)
+    const cacheKeys = this.collectCacheKeys();
+    let expired = 0;
+    let valid = 0;
+    for (const key of cacheKeys) {
       try {
-        const r = n, o = await this.get(r, "local");
-        o && (Date.now() - o.timestamp > o.ttl ? t++ : s++);
+        const cacheKey = key;
+        const entry = await this.get(cacheKey, "local");
+        if (entry) {
+          if (Date.now() - entry.timestamp > entry.ttl) {
+            expired++;
+          } else {
+            valid++;
+          }
+        }
       } catch {
       }
-    return { total: e.length, expired: t, valid: s };
+    }
+    return { total: cacheKeys.length, expired, valid };
   }
   // ═══════════════════════════════════════════════
   // 历史记录管理
@@ -2224,17 +2825,22 @@ class $t {
    * @param options - 可选：备注、标签
    * @returns 生成的记录 ID
    */
-  async addHistory(e, t) {
-    const s = {
-      id: Pt(),
+  async addHistory(result, options) {
+    const record = {
+      id: generateId(),
       createdAt: Date.now(),
-      note: t == null ? void 0 : t.note,
-      tags: t == null ? void 0 : t.tags,
-      result: e
-    }, n = await this.get("history");
-    n.push(s);
-    const r = 500, o = n.length > r ? n.slice(n.length - r) : n;
-    return await this.set("history", o), await this.setMeta("last_analysis_at", Date.now()), h.debug(`[StorageManager] 已添加分析记录: ${s.id}`), s.id;
+      note: options == null ? void 0 : options.note,
+      tags: options == null ? void 0 : options.tags,
+      result
+    };
+    const history = await this.get("history");
+    history.push(record);
+    const MAX_HISTORY = 500;
+    const trimmed = history.length > MAX_HISTORY ? history.slice(history.length - MAX_HISTORY) : history;
+    await this.set("history", trimmed);
+    await this.setMeta("last_analysis_at", Date.now());
+    logger$1.debug(`[StorageManager] 已添加分析记录: ${record.id}`);
+    return record.id;
   }
   /**
    * 查询历史记录
@@ -2257,13 +2863,24 @@ class $t {
    * });
    * ```
    */
-  async getHistory(e) {
-    let s = await this.get("history");
-    (e == null ? void 0 : e.from) !== void 0 && (s = s.filter((o) => o.createdAt >= e.from)), (e == null ? void 0 : e.to) !== void 0 && (s = s.filter((o) => o.createdAt <= e.to)), e != null && e.verdict && (s = s.filter(
-      (o) => o.result.conclusions.some((c) => c.verdict === e.verdict)
-    )), s.sort((o, c) => c.createdAt - o.createdAt);
-    const n = (e == null ? void 0 : e.offset) ?? 0, r = (e == null ? void 0 : e.limit) ?? s.length;
-    return s.slice(n, n + r);
+  async getHistory(options) {
+    const history = await this.get("history");
+    let filtered = history;
+    if ((options == null ? void 0 : options.from) !== void 0) {
+      filtered = filtered.filter((r) => r.createdAt >= options.from);
+    }
+    if ((options == null ? void 0 : options.to) !== void 0) {
+      filtered = filtered.filter((r) => r.createdAt <= options.to);
+    }
+    if (options == null ? void 0 : options.verdict) {
+      filtered = filtered.filter(
+        (r) => r.result.conclusions.some((c) => c.verdict === options.verdict)
+      );
+    }
+    filtered.sort((a, b) => b.createdAt - a.createdAt);
+    const offset = (options == null ? void 0 : options.offset) ?? 0;
+    const limit = (options == null ? void 0 : options.limit) ?? filtered.length;
+    return filtered.slice(offset, offset + limit);
   }
   /**
    * 删除单条历史记录
@@ -2271,32 +2888,44 @@ class $t {
    * @param recordId - 记录 ID
    * @returns 是否找到并删除
    */
-  async removeHistory(e) {
-    const t = await this.get("history"), s = t.findIndex((n) => n.id === e);
-    return s === -1 ? !1 : (t.splice(s, 1), await this.set("history", t), h.debug(`[StorageManager] 已删除分析记录: ${e}`), !0);
+  async removeHistory(recordId) {
+    const history = await this.get("history");
+    const idx = history.findIndex((r) => r.id === recordId);
+    if (idx === -1) return false;
+    history.splice(idx, 1);
+    await this.set("history", history);
+    logger$1.debug(`[StorageManager] 已删除分析记录: ${recordId}`);
+    return true;
   }
   /**
    * 清空所有历史记录
    */
   async clearHistory() {
-    await this.set("history", []), h.info("[StorageManager] 分析历史已清空");
+    await this.set("history", []);
+    logger$1.info("[StorageManager] 分析历史已清空");
   }
   /**
    * 获取历史记录统计
    */
   async getHistoryStats() {
-    const e = await this.get("history"), t = {}, s = Date.now() - 7 * 864e5, n = Date.now() - 30 * 864e5;
-    let r = 0, o = 0;
-    for (const c of e) {
-      for (const a of c.result.conclusions)
-        t[a.verdict] = (t[a.verdict] ?? 0) + 1;
-      c.createdAt >= s && r++, c.createdAt >= n && o++;
+    const history = await this.get("history");
+    const byVerdict = {};
+    const oneWeekAgo = Date.now() - 7 * 864e5;
+    const oneMonthAgo = Date.now() - 30 * 864e5;
+    let lastWeek = 0;
+    let lastMonth = 0;
+    for (const record of history) {
+      for (const c of record.result.conclusions) {
+        byVerdict[c.verdict] = (byVerdict[c.verdict] ?? 0) + 1;
+      }
+      if (record.createdAt >= oneWeekAgo) lastWeek++;
+      if (record.createdAt >= oneMonthAgo) lastMonth++;
     }
     return {
-      total: e.length,
-      byVerdict: t,
-      lastWeek: r,
-      lastMonth: o
+      total: history.length,
+      byVerdict,
+      lastWeek,
+      lastMonth
     };
   }
   // ═══════════════════════════════════════════════
@@ -2305,23 +2934,23 @@ class $t {
   /**
    * 设置元数据
    */
-  async setMeta(e, t) {
-    const s = `meta_${e}`;
-    await this.set(s, t, "local");
+  async setMeta(name, value) {
+    const key = `meta_${name}`;
+    await this.set(key, value, "local");
   }
   /**
    * 读取元数据
    */
-  async getMeta(e) {
-    const t = `meta_${e}`;
-    return this.get(t, "local");
+  async getMeta(name) {
+    const key = `meta_${name}`;
+    return this.get(key, "local");
   }
   /**
    * 删除元数据
    */
-  async removeMeta(e) {
-    const t = `meta_${e}`;
-    await this.remove(t, "local");
+  async removeMeta(name) {
+    const key = `meta_${name}`;
+    await this.remove(key, "local");
   }
   // ═══════════════════════════════════════════════
   // 变更监听
@@ -2342,11 +2971,17 @@ class $t {
    * unsub();
    * ```
    */
-  onChange(e, t) {
-    this.changeListeners.has(e) || this.changeListeners.set(e, /* @__PURE__ */ new Set());
-    const s = this.changeListeners.get(e);
-    return s.add(t), () => {
-      s.delete(t), s.size === 0 && this.changeListeners.delete(e);
+  onChange(key, callback) {
+    if (!this.changeListeners.has(key)) {
+      this.changeListeners.set(key, /* @__PURE__ */ new Set());
+    }
+    const listeners = this.changeListeners.get(key);
+    listeners.add(callback);
+    return () => {
+      listeners.delete(callback);
+      if (listeners.size === 0) {
+        this.changeListeners.delete(key);
+      }
     };
   }
   /**
@@ -2356,13 +2991,13 @@ class $t {
    * @param callback - 变更回调 (changes)
    * @returns 取消监听的函数
    */
-  onChangeMany(e, t) {
-    const s = e.map(
-      (n) => this.onChange(n, (r, o) => {
-        t({ [n]: { newValue: r, oldValue: o } });
+  onChangeMany(keys, callback) {
+    const unsubs = keys.map(
+      (key) => this.onChange(key, (newValue, oldValue) => {
+        callback({ [key]: { newValue, oldValue } });
       })
     );
-    return () => s.forEach((n) => n());
+    return () => unsubs.forEach((unsub) => unsub());
   }
   // ═══════════════════════════════════════════════
   // 数据迁移
@@ -2381,43 +3016,71 @@ class $t {
    * 幂等 —— 检查 meta_migrated 标记，已迁移则跳过
    */
   async migrateFromLegacy() {
-    if (await this.getMeta("migrated"))
-      return h.info("[StorageManager] 数据迁移已执行过，跳过"), { migrated: 0, skipped: 0 };
-    let t = 0, s = 0;
+    const migrated = await this.getMeta("migrated");
+    if (migrated) {
+      logger$1.info("[StorageManager] 数据迁移已执行过，跳过");
+      return { migrated: 0, skipped: 0 };
+    }
+    let count = 0;
+    let skipped = 0;
     try {
-      const n = await this.getChromeStorage("local").get([
+      const legacyData = await this.getChromeStorage("local").get([
         "xvqiu_settings",
         "deepseek_api_key",
         "xvqiu_installed_at",
         "xvqiu_version"
       ]);
-      if (n.xvqiu_settings) {
-        const r = n.xvqiu_settings, o = {
-          model: r.model ?? $.model,
-          temperature: r.temperature ?? $.temperature,
-          maxTokens: r.maxTokens ?? $.maxTokens,
-          autoAnalyze: r.autoAnalyze ?? $.autoAnalyze,
-          maxConcurrent: r.maxConcurrent ?? $.maxConcurrent,
-          debugMode: r.debugMode ?? $.debugMode
+      if (legacyData.xvqiu_settings) {
+        const oldSettings = legacyData.xvqiu_settings;
+        const newSettings = {
+          model: oldSettings.model ?? DEFAULT_SETTINGS$1.model,
+          temperature: oldSettings.temperature ?? DEFAULT_SETTINGS$1.temperature,
+          maxTokens: oldSettings.maxTokens ?? DEFAULT_SETTINGS$1.maxTokens,
+          autoAnalyze: oldSettings.autoAnalyze ?? DEFAULT_SETTINGS$1.autoAnalyze,
+          maxConcurrent: oldSettings.maxConcurrent ?? DEFAULT_SETTINGS$1.maxConcurrent,
+          debugMode: oldSettings.debugMode ?? DEFAULT_SETTINGS$1.debugMode
         };
-        await this.set("settings", o), t++;
-      } else
-        s++;
-      if (n.deepseek_api_key) {
-        const r = n.deepseek_api_key;
-        r.trim() ? (await this.set("api_key", r.trim()), t++) : s++;
-      } else
-        s++;
-      n.xvqiu_installed_at ? (await this.setMeta("installed_at", n.xvqiu_installed_at), t++) : s++, n.xvqiu_version ? (await this.setMeta("version", n.xvqiu_version), t++) : s++, await this.getChromeStorage("local").remove([
+        await this.set("settings", newSettings);
+        count++;
+      } else {
+        skipped++;
+      }
+      if (legacyData.deepseek_api_key) {
+        const key = legacyData.deepseek_api_key;
+        if (key.trim()) {
+          await this.set("api_key", key.trim());
+          count++;
+        } else {
+          skipped++;
+        }
+      } else {
+        skipped++;
+      }
+      if (legacyData.xvqiu_installed_at) {
+        await this.setMeta("installed_at", legacyData.xvqiu_installed_at);
+        count++;
+      } else {
+        skipped++;
+      }
+      if (legacyData.xvqiu_version) {
+        await this.setMeta("version", legacyData.xvqiu_version);
+        count++;
+      } else {
+        skipped++;
+      }
+      await this.getChromeStorage("local").remove([
         "xvqiu_settings",
         "deepseek_api_key",
         "xvqiu_installed_at",
         "xvqiu_version"
-      ]), await this.setMeta("migrated", !0), h.info(`[StorageManager] 数据迁移完成: 迁移 ${t} 项，跳过 ${s} 项`);
-    } catch (n) {
-      throw h.error("[StorageManager] 数据迁移失败:", n), n;
+      ]);
+      await this.setMeta("migrated", true);
+      logger$1.info(`[StorageManager] 数据迁移完成: 迁移 ${count} 项，跳过 ${skipped} 项`);
+    } catch (err) {
+      logger$1.error("[StorageManager] 数据迁移失败:", err);
+      throw err;
     }
-    return { migrated: t, skipped: s };
+    return { migrated: count, skipped };
   }
   // ═══════════════════════════════════════════════
   // 内部工具
@@ -2427,200 +3090,263 @@ class $t {
    * Chrome 环境 → chrome.storage
    * Electron/其他环境 → 内存回退
    */
-  getChromeStorage(e) {
-    return typeof chrome < "u" && chrome.storage ? e === "sync" ? chrome.storage.sync : chrome.storage.local : this.getMemoryFallback(e);
+  getChromeStorage(area) {
+    if (typeof chrome !== "undefined" && chrome.storage) {
+      return area === "sync" ? chrome.storage.sync : chrome.storage.local;
+    }
+    return this.getMemoryFallback(area);
   }
   /**
    * 创建内存回退 StorageArea（用于 Electron 环境）
    */
-  getMemoryFallback(e) {
-    const t = e === "sync" ? this.memorySync : this.memoryLocal;
+  getMemoryFallback(_area) {
+    const store = _area === "sync" ? this.memorySync : this.memoryLocal;
     return {
-      get: async (s) => {
-        if (s === null) {
-          const r = {};
-          return t.forEach((o, c) => {
-            r[c] = o;
-          }), r;
+      get: async (keys) => {
+        if (keys === null) {
+          const result2 = {};
+          store.forEach((v, k) => {
+            result2[k] = v;
+          });
+          return result2;
         }
-        if (typeof s == "string")
-          return { [s]: t.get(s) };
-        if (Array.isArray(s)) {
-          const r = {};
-          for (const o of s) r[o] = t.get(o);
-          return r;
+        if (typeof keys === "string") {
+          return { [keys]: store.get(keys) };
         }
-        const n = {};
-        for (const [r, o] of Object.entries(s))
-          n[r] = t.has(r) ? t.get(r) : o;
-        return n;
+        if (Array.isArray(keys)) {
+          const result2 = {};
+          for (const key of keys) result2[key] = store.get(key);
+          return result2;
+        }
+        const result = {};
+        for (const [key, defaultValue] of Object.entries(keys)) {
+          result[key] = store.has(key) ? store.get(key) : defaultValue;
+        }
+        return result;
       },
-      set: async (s) => {
-        for (const [n, r] of Object.entries(s))
-          t.set(n, r);
+      set: async (items) => {
+        for (const [key, value] of Object.entries(items)) {
+          store.set(key, value);
+        }
       },
-      remove: async (s) => {
-        const n = Array.isArray(s) ? s : [s];
-        for (const r of n) t.delete(r);
+      remove: async (keys) => {
+        const keyList = Array.isArray(keys) ? keys : [keys];
+        for (const key of keyList) store.delete(key);
       },
-      clear: async () => t.clear(),
+      clear: async () => store.clear(),
       getBytesInUse: async () => 0,
       onChanged: {
         addListener: () => {
         },
         removeListener: () => {
         },
-        hasListener: () => !1
+        hasListener: () => false
       }
     };
   }
   /**
    * 解析键名对应的存储区域
    */
-  resolveArea(e) {
-    return e in C ? C[e] : (e.startsWith("cache_") || e.startsWith("meta_"), "local");
+  resolveArea(key) {
+    if (key in KEY_AREA) {
+      return KEY_AREA[key];
+    }
+    if (key.startsWith("cache_") || key.startsWith("meta_")) {
+      return "local";
+    }
+    return "local";
   }
   /**
    * 写入默认值（首次安装时）
    */
   async ensureDefaults() {
-    const e = Object.keys(C), t = e.filter((l) => C[l] === "sync"), s = e.filter((l) => C[l] === "local"), [n, r] = await Promise.all([
-      t.length > 0 ? this.getChromeStorage("sync").get(t) : Promise.resolve({}),
-      s.length > 0 ? this.getChromeStorage("local").get(s) : Promise.resolve({})
-    ]), o = { ...n, ...r }, c = {};
-    for (const l of e) {
-      const g = l;
-      o[l] === void 0 && (c[l] = this.getDefault(g));
+    const keys = Object.keys(KEY_AREA);
+    const syncKeys = keys.filter((k) => KEY_AREA[k] === "sync");
+    const localKeys = keys.filter((k) => KEY_AREA[k] === "local");
+    const [syncResult, localResult] = await Promise.all([
+      syncKeys.length > 0 ? this.getChromeStorage("sync").get(syncKeys) : Promise.resolve({}),
+      localKeys.length > 0 ? this.getChromeStorage("local").get(localKeys) : Promise.resolve({})
+    ]);
+    const allExisting = { ...syncResult, ...localResult };
+    const toSet = {};
+    for (const key of keys) {
+      const knownKey = key;
+      if (allExisting[key] === void 0) {
+        toSet[key] = this.getDefault(knownKey);
+      }
     }
-    if (Object.keys(c).length === 0) {
-      h.debug("[StorageManager] 所有默认值已存在");
+    if (Object.keys(toSet).length === 0) {
+      logger$1.debug("[StorageManager] 所有默认值已存在");
       return;
     }
-    const a = {}, u = {};
-    for (const [l, g] of Object.entries(c))
-      this.resolveArea(l) === "sync" ? a[l] = g : u[l] = g;
+    const syncToSet = {};
+    const localToSet = {};
+    for (const [key, value] of Object.entries(toSet)) {
+      const area = this.resolveArea(key);
+      if (area === "sync") {
+        syncToSet[key] = value;
+      } else {
+        localToSet[key] = value;
+      }
+    }
     await Promise.all([
-      Object.keys(a).length > 0 ? this.getChromeStorage("sync").set(a) : Promise.resolve(),
-      Object.keys(u).length > 0 ? this.getChromeStorage("local").set(u) : Promise.resolve()
-    ]), await Promise.all([
+      Object.keys(syncToSet).length > 0 ? this.getChromeStorage("sync").set(syncToSet) : Promise.resolve(),
+      Object.keys(localToSet).length > 0 ? this.getChromeStorage("local").set(localToSet) : Promise.resolve()
+    ]);
+    await Promise.all([
       this.getChromeStorage("local").set({
-        [re.VERSION]: "1.0.0",
-        [re.INSTALLED_AT]: Date.now()
+        [META_KEYS.VERSION]: "1.0.0",
+        [META_KEYS.INSTALLED_AT]: Date.now()
       })
-    ]), h.info(`[StorageManager] 默认值已写入: ${Object.keys(c).length} 项`);
+    ]);
+    logger$1.info(`[StorageManager] 默认值已写入: ${Object.keys(toSet).length} 项`);
   }
   /**
    * 预热内存缓存 — 从 Chrome Storage 读取所有已知键
    */
   async warmCache() {
-    const e = Object.keys(C), t = e.filter((c) => C[c] === "sync"), s = e.filter((c) => C[c] === "local"), [n, r] = await Promise.all([
-      t.length > 0 ? this.getChromeStorage("sync").get(t) : Promise.resolve({}),
-      s.length > 0 ? this.getChromeStorage("local").get(s) : Promise.resolve({})
-    ]), o = { ...n, ...r };
-    for (const c of e)
-      this.memoryCache.set(c, o[c] ?? this.getDefault(c));
-    h.debug(`[StorageManager] 内存缓存已预热: ${e.length} 个键`);
+    const knownKeys = Object.keys(KEY_AREA);
+    const syncKeys = knownKeys.filter((k) => KEY_AREA[k] === "sync");
+    const localKeys = knownKeys.filter((k) => KEY_AREA[k] === "local");
+    const [syncResult, localResult] = await Promise.all([
+      syncKeys.length > 0 ? this.getChromeStorage("sync").get(syncKeys) : Promise.resolve({}),
+      localKeys.length > 0 ? this.getChromeStorage("local").get(localKeys) : Promise.resolve({})
+    ]);
+    const all = { ...syncResult, ...localResult };
+    for (const key of knownKeys) {
+      this.memoryCache.set(key, all[key] ?? this.getDefault(key));
+    }
+    logger$1.debug(`[StorageManager] 内存缓存已预热: ${knownKeys.length} 个键`);
   }
   /**
    * 收集所有缓存键
    */
   collectCacheKeys() {
-    const e = [];
-    for (const t of this.memoryCache.keys())
-      t.startsWith("cache_") && e.push(t);
-    return e;
+    const keys = [];
+    for (const key of this.memoryCache.keys()) {
+      if (key.startsWith("cache_")) {
+        keys.push(key);
+      }
+    }
+    return keys;
   }
   /**
    * 收集所有元数据键
    */
   collectMetaKeys() {
-    const e = [];
-    for (const t of this.memoryCache.keys())
-      t.startsWith("meta_") && e.push(t);
-    for (const t of Object.values(re))
-      e.includes(t) || e.push(t);
-    return e;
+    const keys = [];
+    for (const key of this.memoryCache.keys()) {
+      if (key.startsWith("meta_")) {
+        keys.push(key);
+      }
+    }
+    for (const value of Object.values(META_KEYS)) {
+      if (!keys.includes(value)) {
+        keys.push(value);
+      }
+    }
+    return keys;
   }
   /**
    * 绑定 chrome.storage.onChanged 监听
    */
   bindOnChange() {
-    var e;
-    if (typeof chrome > "u" || !((e = chrome.storage) != null && e.onChanged)) {
-      h.warn("[StorageManager] chrome.storage.onChanged 不可用");
+    var _a2;
+    if (typeof chrome === "undefined" || !((_a2 = chrome.storage) == null ? void 0 : _a2.onChanged)) {
+      logger$1.warn("[StorageManager] chrome.storage.onChanged 不可用");
       return;
     }
     chrome.storage.onChanged.addListener(
-      (t, s) => {
-        for (const [n, { oldValue: r, newValue: o }] of Object.entries(t)) {
-          if (!this.isManagedKey(n)) continue;
-          this.memoryCache.set(n, o);
-          const c = this.changeListeners.get(n);
-          if (c && c.size > 0)
-            for (const a of c)
+      (changes, areaName) => {
+        for (const [key, { oldValue, newValue }] of Object.entries(changes)) {
+          if (!this.isManagedKey(key)) continue;
+          this.memoryCache.set(key, newValue);
+          const listeners = this.changeListeners.get(key);
+          if (listeners && listeners.size > 0) {
+            for (const callback of listeners) {
               try {
-                a(o, r);
-              } catch (u) {
-                h.error(`[StorageManager] 变更监听回调出错 (${n}):`, u);
+                callback(newValue, oldValue);
+              } catch (err) {
+                logger$1.error(`[StorageManager] 变更监听回调出错 (${key}):`, err);
               }
+            }
+          }
         }
       }
-    ), this.onChangeBound = !0, h.debug("[StorageManager] onChanged 监听已绑定");
+    );
+    this.onChangeBound = true;
+    logger$1.debug("[StorageManager] onChanged 监听已绑定");
   }
   /**
    * 判断键是否由 StorageManager 管理
    */
-  isManagedKey(e) {
-    return e in C || e.startsWith("cache_") || e.startsWith("meta_");
+  isManagedKey(key) {
+    return key in KEY_AREA || key.startsWith("cache_") || key.startsWith("meta_");
   }
   /**
    * 校验值的合法性
    *
    * @throws {ValidationError} 校验不通过
    */
-  validateValue(e, t) {
-    if (t != null)
-      switch (e) {
-        case "api_key": {
-          if (typeof t != "string")
-            throw new L(e, "API Key 必须是字符串");
-          if (t.length > 2048)
-            throw new L(e, "API Key 长度超过 2048 字符");
-          break;
+  validateValue(key, value) {
+    if (value === null || value === void 0) {
+      return;
+    }
+    switch (key) {
+      case "api_key": {
+        if (typeof value !== "string") {
+          throw new ValidationError(key, "API Key 必须是字符串");
         }
-        case "settings": {
-          if (typeof t != "object" || t === null)
-            throw new L(e, "设置必须是对象");
-          const s = t;
-          if (typeof s.model != "string")
-            throw new L(e, "model 必须是字符串");
-          if (typeof s.temperature != "number" || s.temperature < 0 || s.temperature > 2)
-            throw new L(e, "temperature 必须在 0-2 范围内");
-          if (typeof s.maxTokens != "number" || s.maxTokens < 1 || s.maxTokens > 128e3)
-            throw new L(e, "maxTokens 必须在 1-128000 范围内");
-          break;
+        if (value.length > 2048) {
+          throw new ValidationError(key, "API Key 长度超过 2048 字符");
         }
-        case "watchlist": {
-          if (!Array.isArray(t))
-            throw new L(e, "自选股必须是数组");
-          if (t.length > 200)
-            throw new L(e, "自选股数量超过 200 上限");
-          for (const s of t)
-            if (typeof s != "string")
-              throw new L(e, "自选股元素必须是字符串");
-          break;
-        }
-        case "history": {
-          if (!Array.isArray(t))
-            throw new L(e, "历史记录必须是数组");
-          break;
-        }
-        default: {
-          if (e.startsWith("cache_") && (typeof t != "object" || t === null))
-            throw new L(e, "缓存值必须是对象（CacheEntry）");
-          break;
-        }
+        break;
       }
+      case "settings": {
+        if (typeof value !== "object" || value === null) {
+          throw new ValidationError(key, "设置必须是对象");
+        }
+        const s = value;
+        if (typeof s.model !== "string") {
+          throw new ValidationError(key, "model 必须是字符串");
+        }
+        if (typeof s.temperature !== "number" || s.temperature < 0 || s.temperature > 2) {
+          throw new ValidationError(key, "temperature 必须在 0-2 范围内");
+        }
+        if (typeof s.maxTokens !== "number" || s.maxTokens < 1 || s.maxTokens > 128e3) {
+          throw new ValidationError(key, "maxTokens 必须在 1-128000 范围内");
+        }
+        break;
+      }
+      case "watchlist": {
+        if (!Array.isArray(value)) {
+          throw new ValidationError(key, "自选股必须是数组");
+        }
+        if (value.length > 200) {
+          throw new ValidationError(key, "自选股数量超过 200 上限");
+        }
+        for (const item of value) {
+          if (typeof item !== "string") {
+            throw new ValidationError(key, "自选股元素必须是字符串");
+          }
+        }
+        break;
+      }
+      case "history": {
+        if (!Array.isArray(value)) {
+          throw new ValidationError(key, "历史记录必须是数组");
+        }
+        break;
+      }
+      default: {
+        if (key.startsWith("cache_")) {
+          if (typeof value !== "object" || value === null) {
+            throw new ValidationError(key, "缓存值必须是对象（CacheEntry）");
+          }
+        }
+        break;
+      }
+    }
   }
   /**
    * 检查 sync 区域配额
@@ -2631,18 +3357,19 @@ class $t {
    *
    * @throws {QuotaExceededError} 超出配额
    */
-  checkSyncQuota(e, t) {
-    const s = this.estimateSize(t);
-    if (s > 8192)
-      throw new be(e, s, 8192);
+  checkSyncQuota(key, value) {
+    const size = this.estimateSize(value);
+    if (size > 8192) {
+      throw new QuotaExceededError(key, size, 8192);
+    }
   }
   /**
    * 估算值的 JSON 序列化大小（字节）
    */
-  estimateSize(e) {
+  estimateSize(value) {
     try {
-      const t = JSON.stringify(e);
-      return new TextEncoder().encode(t).length;
+      const json = JSON.stringify(value);
+      return new TextEncoder().encode(json).length;
     } catch {
       return 0;
     }
@@ -2650,29 +3377,33 @@ class $t {
   /**
    * 将错误包装为 StorageError
    */
-  wrapError(e, t, s) {
-    if (e instanceof Q) return e;
-    const n = e instanceof Error ? e.message : String(e);
-    return new Q(
-      `${t}: ${n}`,
+  wrapError(err, fallbackMsg, key) {
+    if (err instanceof StorageError) return err;
+    const message = err instanceof Error ? err.message : String(err);
+    return new StorageError(
+      `${fallbackMsg}: ${message}`,
       "UNKNOWN",
-      s
+      key
     );
   }
 }
-function Pt() {
-  const i = "0123456789abcdef";
-  return [8, 4, 4, 4, 12].map((t) => {
+function generateId() {
+  const chars = "0123456789abcdef";
+  const sections = [8, 4, 4, 4, 12];
+  return sections.map((len) => {
     let s = "";
-    for (let n = 0; n < t; n++)
-      s += i[Math.floor(Math.random() * 16)];
+    for (let i = 0; i < len; i++) {
+      s += chars[Math.floor(Math.random() * 16)];
+    }
     return s;
   }).join("-");
 }
-function Dt(i) {
-  return i == null ? i : JSON.parse(JSON.stringify(i));
+function deepClone(value) {
+  if (value === null || value === void 0) return value;
+  return JSON.parse(JSON.stringify(value));
 }
-const bt = new $t(), x = {
+const storageManager = new StorageManager();
+const CACHE_KEYS = {
   /** 个股行情 */
   QUOTE: "quote",
   /** 大盘指数 */
@@ -2685,22 +3416,26 @@ const bt = new $t(), x = {
   HOT_TOPICS: "hot_topics",
   /** 分析结果 */
   ANALYSIS: "analysis"
-}, Ie = {
-  [x.QUOTE]: { t1: 1e4, t2: 3e4 },
-  [x.MARKET_INDEX]: { t1: 15e3, t2: 45e3 },
-  [x.SECTORS]: { t1: 15e3, t2: 6e4 },
-  [x.SECTOR_DETAIL]: { t1: 15e3, t2: 6e4 },
-  [x.HOT_TOPICS]: { t1: 15e3, t2: 6e4 },
-  [x.ANALYSIS]: { t1: 6e4, t2: 3e5 }
-}, It = {
+};
+const CACHE_TTL = {
+  [CACHE_KEYS.QUOTE]: { t1: 1e4, t2: 3e4 },
+  [CACHE_KEYS.MARKET_INDEX]: { t1: 15e3, t2: 45e3 },
+  [CACHE_KEYS.SECTORS]: { t1: 15e3, t2: 6e4 },
+  [CACHE_KEYS.SECTOR_DETAIL]: { t1: 15e3, t2: 6e4 },
+  [CACHE_KEYS.HOT_TOPICS]: { t1: 15e3, t2: 6e4 },
+  [CACHE_KEYS.ANALYSIS]: { t1: 6e4, t2: 3e5 }
+};
+const DEFAULT_CONFIG$1 = {
   t1DefaultTTL: 1e4,
   t2DefaultTTL: 3e4,
   t1MaxSize: 500,
-  enabled: !0
-}, xt = 6e4;
-class Rt {
-  constructor(e, t) {
-    this.tier1 = /* @__PURE__ */ new Map(), this.stats = {
+  enabled: true
+};
+const CLEANUP_INTERVAL = 6e4;
+class CacheManager {
+  constructor(config, storage) {
+    this.tier1 = /* @__PURE__ */ new Map();
+    this.stats = {
       tier1Size: 0,
       tier1Hits: 0,
       tier1Misses: 0,
@@ -2708,18 +3443,33 @@ class Rt {
       tier2Misses: 0,
       sets: 0,
       evictions: 0
-    }, this.cleanupTimer = null, this.initialized = !1, this.config = { ...It, ...e }, this.storage = t ?? bt;
+    };
+    this.cleanupTimer = null;
+    this.initialized = false;
+    this.config = { ...DEFAULT_CONFIG$1, ...config };
+    this.storage = storage ?? storageManager;
   }
   // ─── 初始化 / 销毁 ──────────────────────────────────
   /** 启动定期清理 */
   async init() {
-    this.initialized || (typeof setInterval < "u" && (this.cleanupTimer = setInterval(() => {
-      this.evictExpired();
-    }, xt)), this.initialized = !0, h.debug("[CacheManager] 已初始化"));
+    if (this.initialized) return;
+    if (typeof setInterval !== "undefined") {
+      this.cleanupTimer = setInterval(() => {
+        this.evictExpired();
+      }, CLEANUP_INTERVAL);
+    }
+    this.initialized = true;
+    logger$1.debug("[CacheManager] 已初始化");
   }
   /** 释放资源 */
   destroy() {
-    this.cleanupTimer !== null && (clearInterval(this.cleanupTimer), this.cleanupTimer = null), this.tier1.clear(), this.initialized = !1, h.debug("[CacheManager] 已销毁");
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    this.tier1.clear();
+    this.initialized = false;
+    logger$1.debug("[CacheManager] 已销毁");
   }
   // ─── 核心读写 ──────────────────────────────────────
   /**
@@ -2733,26 +3483,32 @@ class Rt {
    * @param cacheKey 缓存键（自动加类型前缀）
    * @returns 缓存数据，未命中返回 null
    */
-  async get(e) {
+  async get(cacheKey) {
     if (!this.config.enabled) return null;
-    const t = this.tier1.get(e);
-    if (t) {
-      if (Date.now() < t.expiresAt)
-        return this.stats.tier1Hits++, t.data;
-      this.tier1.delete(e), this.stats.evictions++;
-    } else
+    const t1Entry = this.tier1.get(cacheKey);
+    if (t1Entry) {
+      if (Date.now() < t1Entry.expiresAt) {
+        this.stats.tier1Hits++;
+        return t1Entry.data;
+      }
+      this.tier1.delete(cacheKey);
+      this.stats.evictions++;
+    } else {
       this.stats.tier1Misses++;
+    }
     try {
-      const s = await this.storage.getCache(e);
-      if (s !== null) {
+      const t2Data = await this.storage.getCache(cacheKey);
+      if (t2Data !== null) {
         this.stats.tier2Hits++;
-        const n = this.getT2TTL(e);
-        return this.setT1(e, s, n), s;
+        const ttl = this.getT2TTL(cacheKey);
+        this.setT1(cacheKey, t2Data, ttl);
+        return t2Data;
       }
     } catch {
-      h.warn(`[CacheManager] Tier-2 读取失败: ${e}`);
+      logger$1.warn(`[CacheManager] Tier-2 读取失败: ${cacheKey}`);
     }
-    return this.stats.tier2Misses++, null;
+    this.stats.tier2Misses++;
+    return null;
   }
   /**
    * 写入缓存 (Tier-1 + Tier-2)
@@ -2761,39 +3517,41 @@ class Rt {
    * @param data     数据
    * @param customTTL 可选 — 自定义 TTL { t1?, t2? }
    */
-  async set(e, t, s) {
+  async set(cacheKey, data, customTTL) {
     if (!this.config.enabled) return;
     this.stats.sets++;
-    const n = (s == null ? void 0 : s.t1) ?? this.getT1TTL(e);
-    this.setT1(e, t, n);
+    const t1TTL = (customTTL == null ? void 0 : customTTL.t1) ?? this.getT1TTL(cacheKey);
+    this.setT1(cacheKey, data, t1TTL);
     try {
-      const r = (s == null ? void 0 : s.t2) ?? this.getT2TTL(e);
-      await this.storage.setCache(e, t, r);
-    } catch (r) {
-      h.warn(`[CacheManager] Tier-2 写入失败: ${e}`, r);
+      const t2TTL = (customTTL == null ? void 0 : customTTL.t2) ?? this.getT2TTL(cacheKey);
+      await this.storage.setCache(cacheKey, data, t2TTL);
+    } catch (err) {
+      logger$1.warn(`[CacheManager] Tier-2 写入失败: ${cacheKey}`, err);
     }
   }
   /**
    * 删除缓存 (Tier-1 + Tier-2)
    */
-  async delete(e) {
-    this.tier1.delete(e);
+  async delete(cacheKey) {
+    this.tier1.delete(cacheKey);
     try {
-      await this.storage.removeCache(e);
+      await this.storage.removeCache(cacheKey);
     } catch {
     }
   }
   /**
    * 判断缓存是否存在且有效
    */
-  async has(e) {
-    const t = this.tier1.get(e);
-    if (t && Date.now() < t.expiresAt)
-      return !0;
+  async has(cacheKey) {
+    const t1Entry = this.tier1.get(cacheKey);
+    if (t1Entry && Date.now() < t1Entry.expiresAt) {
+      return true;
+    }
     try {
-      return await this.storage.getCache(e) !== null;
+      const t2Data = await this.storage.getCache(cacheKey);
+      return t2Data !== null;
     } catch {
-      return !1;
+      return false;
     }
   }
   // ─── 批量操作 ──────────────────────────────────────
@@ -2801,44 +3559,62 @@ class Rt {
    * 批量读取缓存
    * 返回 Map<cacheKey, T | null>
    */
-  async getMany(e) {
-    const t = /* @__PURE__ */ new Map(), s = [];
-    for (const n of e) {
-      const r = this.tier1.get(n);
-      r && Date.now() < r.expiresAt ? (t.set(n, r.data), this.stats.tier1Hits++) : (s.push(n), this.stats.tier1Misses++);
-    }
-    if (s.length === 0) return t;
-    for (const n of s)
-      try {
-        const r = await this.storage.getCache(n);
-        if (r !== null) {
-          t.set(n, r), this.stats.tier2Hits++;
-          const o = this.getT2TTL(n);
-          this.setT1(n, r, o);
-        } else
-          t.set(n, null), this.stats.tier2Misses++;
-      } catch {
-        t.set(n, null), this.stats.tier2Misses++;
+  async getMany(cacheKeys) {
+    const result = /* @__PURE__ */ new Map();
+    const remaining = [];
+    for (const key of cacheKeys) {
+      const t1Entry = this.tier1.get(key);
+      if (t1Entry && Date.now() < t1Entry.expiresAt) {
+        result.set(key, t1Entry.data);
+        this.stats.tier1Hits++;
+      } else {
+        remaining.push(key);
+        this.stats.tier1Misses++;
       }
-    return t;
+    }
+    if (remaining.length === 0) return result;
+    for (const key of remaining) {
+      try {
+        const t2Data = await this.storage.getCache(key);
+        if (t2Data !== null) {
+          result.set(key, t2Data);
+          this.stats.tier2Hits++;
+          const ttl = this.getT2TTL(key);
+          this.setT1(key, t2Data, ttl);
+        } else {
+          result.set(key, null);
+          this.stats.tier2Misses++;
+        }
+      } catch {
+        result.set(key, null);
+        this.stats.tier2Misses++;
+      }
+    }
+    return result;
   }
   /**
    * 清除所有缓存 (Tier-1 + Tier-2)
    */
   async clear() {
-    this.tier1.clear(), this.stats.evictions += this.tier1.size, await this.storage.clearAllCache().catch(() => {
-    }), h.info("[CacheManager] 缓存已全部清除");
+    this.tier1.clear();
+    this.stats.evictions += this.tier1.size;
+    await this.storage.clearAllCache().catch(() => {
+    });
+    logger$1.info("[CacheManager] 缓存已全部清除");
   }
   /**
    * 清除指定类型的缓存
    *
    * @param type 缓存类型前缀，如 'quote' | 'sectors'
    */
-  async clearByType(e) {
-    const t = `cache_${e}`;
-    for (const s of this.tier1.keys())
-      s.startsWith(t) && this.tier1.delete(s);
-    h.debug(`[CacheManager] 清除类型缓存: ${e}`);
+  async clearByType(type) {
+    const prefix = `cache_${type}`;
+    for (const key of this.tier1.keys()) {
+      if (key.startsWith(prefix)) {
+        this.tier1.delete(key);
+      }
+    }
+    logger$1.debug(`[CacheManager] 清除类型缓存: ${type}`);
   }
   // ─── 统计 & 管理 ──────────────────────────────────
   /** 获取缓存统计 */
@@ -2865,8 +3641,8 @@ class Rt {
     return Array.from(this.tier1.keys());
   }
   /** 配置运行中更新 */
-  setConfig(e) {
-    this.config = { ...this.config, ...e };
+  setConfig(partial) {
+    this.config = { ...this.config, ...partial };
   }
   /** 获取当前配置 */
   getConfig() {
@@ -2874,36 +3650,50 @@ class Rt {
   }
   // ─── 内部方法 ──────────────────────────────────────
   /** 写入 Tier-1 (内存) */
-  setT1(e, t, s) {
+  setT1(key, data, ttlMs) {
     if (this.tier1.size >= this.config.t1MaxSize) {
-      const n = this.tier1.keys().next().value;
-      n !== void 0 && (this.tier1.delete(n), this.stats.evictions++);
+      const oldestKey = this.tier1.keys().next().value;
+      if (oldestKey !== void 0) {
+        this.tier1.delete(oldestKey);
+        this.stats.evictions++;
+      }
     }
-    this.tier1.set(e, {
-      data: t,
-      expiresAt: Date.now() + s
+    this.tier1.set(key, {
+      data,
+      expiresAt: Date.now() + ttlMs
     });
   }
   /** 惰性淘汰过期条目 */
   evictExpired() {
-    const e = Date.now();
-    let t = 0;
-    for (const [s, n] of this.tier1.entries())
-      e >= n.expiresAt && (this.tier1.delete(s), t++);
-    t > 0 && (this.stats.evictions += t, h.debug(`[CacheManager] 淘汰 ${t} 条过期缓存`));
+    const now = Date.now();
+    let evicted = 0;
+    for (const [key, entry] of this.tier1.entries()) {
+      if (now >= entry.expiresAt) {
+        this.tier1.delete(key);
+        evicted++;
+      }
+    }
+    if (evicted > 0) {
+      this.stats.evictions += evicted;
+      logger$1.debug(`[CacheManager] 淘汰 ${evicted} 条过期缓存`);
+    }
   }
   /** 根据缓存键推测 Tier-1 TTL */
-  getT1TTL(e) {
-    for (const [t, s] of Object.entries(Ie))
-      if (e.startsWith(`cache_${t}`) || e.startsWith(t))
-        return s.t1;
+  getT1TTL(cacheKey) {
+    for (const [type, ttl] of Object.entries(CACHE_TTL)) {
+      if (cacheKey.startsWith(`cache_${type}`) || cacheKey.startsWith(type)) {
+        return ttl.t1;
+      }
+    }
     return this.config.t1DefaultTTL;
   }
   /** 根据缓存键推测 Tier-2 TTL */
-  getT2TTL(e) {
-    for (const [t, s] of Object.entries(Ie))
-      if (e.startsWith(`cache_${t}`) || e.startsWith(t))
-        return s.t2;
+  getT2TTL(cacheKey) {
+    for (const [type, ttl] of Object.entries(CACHE_TTL)) {
+      if (cacheKey.startsWith(`cache_${type}`) || cacheKey.startsWith(type)) {
+        return ttl.t2;
+      }
+    }
     return this.config.t2DefaultTTL;
   }
   /**
@@ -2916,21 +3706,31 @@ class Rt {
    * cache.key('analysis', 'pool')   → 'analysis:pool'
    * ```
    */
-  static makeKey(e, ...t) {
-    return t.length === 0 ? e : `${e}:${t.join(":")}`;
+  static makeKey(type, ...parts) {
+    if (parts.length === 0) return type;
+    return `${type}:${parts.join(":")}`;
   }
 }
-const Ot = new Rt(), Nt = {
+const cacheManager = new CacheManager();
+const DEFAULT_CONFIG = {
   maxConcurrent: 10,
-  enableLocalPreAnalysis: !0,
-  useCache: !0,
+  enableLocalPreAnalysis: true,
+  useCache: true,
   model: "deepseek-chat",
   temperature: 0.7,
   maxTokens: 4096
 };
-class je {
-  constructor(e, t) {
-    this.config = { ...Nt, ...e }, this.marketAnalyzer = (t == null ? void 0 : t.marketAnalyzer) ?? new mt(), this.directionAnalyzer = (t == null ? void 0 : t.directionAnalyzer) ?? new Be(), this.stockAnalyzer = (t == null ? void 0 : t.stockAnalyzer) ?? new St(), this.conclusionEngine = (t == null ? void 0 : t.conclusionEngine) ?? new vt(), this.promptBuilder = (t == null ? void 0 : t.promptBuilder) ?? new Lt(), this.dataSource = (t == null ? void 0 : t.dataSource) ?? new He(), this.llmClient = (t == null ? void 0 : t.llmClient) ?? new Ke(), this.cache = (t == null ? void 0 : t.cache) ?? Ot;
+class AnalysisEngine {
+  constructor(config, deps) {
+    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.marketAnalyzer = (deps == null ? void 0 : deps.marketAnalyzer) ?? new L1MarketAnalyzer();
+    this.directionAnalyzer = (deps == null ? void 0 : deps.directionAnalyzer) ?? new L2DirectionAnalyzer();
+    this.stockAnalyzer = (deps == null ? void 0 : deps.stockAnalyzer) ?? new L3StockAnalyzer();
+    this.conclusionEngine = (deps == null ? void 0 : deps.conclusionEngine) ?? new L4ConclusionEngine();
+    this.promptBuilder = (deps == null ? void 0 : deps.promptBuilder) ?? new PromptBuilder();
+    this.dataSource = (deps == null ? void 0 : deps.dataSource) ?? new EastMoneyAdapter();
+    this.llmClient = (deps == null ? void 0 : deps.llmClient) ?? new DeepSeekClient();
+    this.cache = (deps == null ? void 0 : deps.cache) ?? cacheManager;
   }
   // ═════════════════════════════════════════════════════════════
   // 入口方法
@@ -2949,65 +3749,71 @@ class je {
    * @param options - 分析参数
    * @returns 完整分析结果
    */
-  async analyzePool(e) {
-    const { stocks: t, forceRefresh: s, streamCallbacks: n, signal: r } = e;
-    if (!t || t.length === 0)
+  async analyzePool(options) {
+    const { stocks, forceRefresh, streamCallbacks, signal } = options;
+    if (!stocks || stocks.length === 0) {
       throw new Error("股票列表为空");
-    if (t.length > 50)
+    }
+    if (stocks.length > 50) {
       throw new Error("单次分析最多支持 50 只股票");
-    h.info(`[Engine] 开始分析股票池: ${t.length} 只`, t);
-    const o = await this.fetchMarketData(s);
-    r == null || r.throwIfAborted();
-    const c = await this.runL1(o.indices, o.sectors);
-    r == null || r.throwIfAborted();
-    const a = await this.runL2(o.sectors, o.topics);
-    r == null || r.throwIfAborted();
-    const u = await this.runL3(
-      t,
-      o.indices,
-      o.sectors
+    }
+    logger$1.info(`[Engine] 开始分析股票池: ${stocks.length} 只`, stocks);
+    const marketData = await this.fetchMarketData(forceRefresh);
+    signal == null ? void 0 : signal.throwIfAborted();
+    const envResult = await this.runL1(marketData.indices, marketData.sectors);
+    signal == null ? void 0 : signal.throwIfAborted();
+    const directions = await this.runL2(marketData.sectors, marketData.topics);
+    signal == null ? void 0 : signal.throwIfAborted();
+    const stockAnalyses = await this.runL3(
+      stocks,
+      marketData.indices,
+      marketData.sectors
     );
-    r == null || r.throwIfAborted();
-    const l = await this.callLLM(
+    signal == null ? void 0 : signal.throwIfAborted();
+    const llmResult = await this.callLLM(
       {
-        indices: o.indices,
-        sectors: o.sectors,
-        topics: o.topics,
-        quotes: o.quotes,
-        stocksToAnalyze: t.map((m) => ({
-          code: m,
-          name: this.findStockName(m, o.quotes)
+        indices: marketData.indices,
+        sectors: marketData.sectors,
+        topics: marketData.topics,
+        quotes: marketData.quotes,
+        stocksToAnalyze: stocks.map((c) => ({
+          code: c,
+          name: this.findStockName(c, marketData.quotes)
         })),
-        envResult: c,
-        directions: a,
-        stockAnalyses: u
+        envResult,
+        directions,
+        stockAnalyses
       },
-      { streamCallbacks: n, signal: r }
-    ), g = await this.runL4(l, {
-      envLevel: c.envLevel,
-      stockCodes: t
+      { streamCallbacks, signal }
+    );
+    const result = await this.runL4(llmResult, {
+      envLevel: envResult.envLevel,
+      stockCodes: stocks
     });
-    return h.info("[Engine] 分析完成:", {
-      stocks: t.length,
-      envLevel: g.marketEnv.envLevel,
-      conclusions: g.conclusions.length,
-      buyCount: g.conclusions.filter((m) => m.verdict === "BUY").length
-    }), g;
+    logger$1.info("[Engine] 分析完成:", {
+      stocks: stocks.length,
+      envLevel: result.marketEnv.envLevel,
+      conclusions: result.conclusions.length,
+      buyCount: result.conclusions.filter((c) => c.verdict === "BUY").length
+    });
+    return result;
   }
   /**
    * 环境诊断（仅 L1）
    *
    * 快速获取市场环境评级，不分析个股
    */
-  async envCheck(e) {
-    var n;
-    h.info("[Engine] 环境诊断");
-    const t = await this.fetchMarketData(e == null ? void 0 : e.forceRefresh);
-    return (n = e == null ? void 0 : e.signal) == null || n.throwIfAborted(), {
-      ...await this.runL1(t.indices, t.sectors),
-      indices: t.indices,
-      sectors: t.sectors,
-      topics: t.topics
+  async envCheck(options) {
+    var _a2;
+    logger$1.info("[Engine] 环境诊断");
+    const marketData = await this.fetchMarketData(options == null ? void 0 : options.forceRefresh);
+    (_a2 = options == null ? void 0 : options.signal) == null ? void 0 : _a2.throwIfAborted();
+    const envResult = await this.runL1(marketData.indices, marketData.sectors);
+    return {
+      ...envResult,
+      indices: marketData.indices,
+      sectors: marketData.sectors,
+      topics: marketData.topics
     };
   }
   /**
@@ -3020,38 +3826,46 @@ class je {
    *   4. 构建单票 Prompt → LLM
    *   5. L4 → 解析结论
    */
-  async analyzeSingle(e) {
-    var d, y, p;
-    const { code: t, forceRefresh: s, streamCallbacks: n, signal: r } = e;
-    if (!t)
+  async analyzeSingle(options) {
+    var _a2, _b, _c;
+    const { code, forceRefresh, streamCallbacks, signal } = options;
+    if (!code) {
       throw new Error("请提供股票代码");
-    h.info(`[Engine] 单票分析: ${t}`);
-    const [o, c] = await Promise.all([
-      this.fetchMarketData(s),
-      this.dataSource.getQuote(t)
+    }
+    logger$1.info(`[Engine] 单票分析: ${code}`);
+    const [marketData, quote] = await Promise.all([
+      this.fetchMarketData(forceRefresh),
+      this.dataSource.getQuote(code)
     ]);
-    r == null || r.throwIfAborted();
-    const [a, u] = await Promise.all([
-      this.runL1(o.indices, o.sectors),
-      this.runL2(o.sectors, o.topics)
+    signal == null ? void 0 : signal.throwIfAborted();
+    const [envResult, directions] = await Promise.all([
+      this.runL1(marketData.indices, marketData.sectors),
+      this.runL2(marketData.sectors, marketData.topics)
     ]);
-    r == null || r.throwIfAborted();
-    const l = this.promptBuilder.buildSingleStockPrompt({
-      quote: c,
-      indices: o.indices,
-      sectors: o.sectors
+    signal == null ? void 0 : signal.throwIfAborted();
+    const messages = this.promptBuilder.buildSingleStockPrompt({
+      quote,
+      indices: marketData.indices,
+      sectors: marketData.sectors
     });
-    let g;
-    n ? g = (await this.llmClient.chatStream(
-      l,
-      n,
-      { signal: r }
-    )).fullContent : g = ((p = (y = (d = (await this.llmClient.chat(l, { signal: r })).choices) == null ? void 0 : d[0]) == null ? void 0 : y.message) == null ? void 0 : p.content) ?? "";
-    const m = await this.runL4(g, {
-      envLevel: a.envLevel,
-      stockCodes: [t]
+    let llmOutput;
+    if (streamCallbacks) {
+      const streamResult = await this.llmClient.chatStream(
+        messages,
+        streamCallbacks,
+        { signal }
+      );
+      llmOutput = streamResult.fullContent;
+    } else {
+      const response = await this.llmClient.chat(messages, { signal });
+      llmOutput = ((_c = (_b = (_a2 = response.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) ?? "";
+    }
+    const result = await this.runL4(llmOutput, {
+      envLevel: envResult.envLevel,
+      stockCodes: [code]
     });
-    return h.info(`[Engine] 单票分析完成: ${c.name}(${t})`), m;
+    logger$1.info(`[Engine] 单票分析完成: ${quote.name}(${code})`);
+    return result;
   }
   // ═════════════════════════════════════════════════════════════
   // 数据获取
@@ -3059,16 +3873,17 @@ class je {
   /**
    * 获取所有市场数据（并行）
    */
-  async fetchMarketData(e) {
-    const t = e ? { useCache: !1 } : { useCache: this.config.useCache }, [s, n, r] = await Promise.all([
-      this.dataSource.getMarketIndex(t),
-      this.dataSource.getSectors(t),
-      this.dataSource.getHotTopics(t)
+  async fetchMarketData(forceRefresh) {
+    const cacheOpts = forceRefresh ? { useCache: false } : { useCache: this.config.useCache };
+    const [indices, sectors, topics] = await Promise.all([
+      this.dataSource.getMarketIndex(cacheOpts),
+      this.dataSource.getSectors(cacheOpts),
+      this.dataSource.getHotTopics(cacheOpts)
     ]);
     return {
-      indices: s,
-      sectors: n,
-      topics: r,
+      indices,
+      sectors,
+      topics,
       quotes: []
       // 个股行情在 L3 阶段按需获取
     };
@@ -3076,43 +3891,49 @@ class je {
   /**
    * 获取个股行情（缓存）
    */
-  async fetchQuotes(e, t) {
-    const s = t ? { useCache: !1 } : { useCache: this.config.useCache };
-    if (e.length <= 50)
-      return await this.dataSource.getQuotes(e, s);
-    const n = [];
-    for (let r = 0; r < e.length; r += 50) {
-      const o = e.slice(r, r + 50), c = await this.dataSource.getQuotes(o, s);
-      n.push(...c);
+  async fetchQuotes(codes, forceRefresh) {
+    const cacheOpts = forceRefresh ? { useCache: false } : { useCache: this.config.useCache };
+    if (codes.length <= 50) {
+      return await this.dataSource.getQuotes(codes, cacheOpts);
     }
-    return n;
+    const results = [];
+    for (let i = 0; i < codes.length; i += 50) {
+      const batch = codes.slice(i, i + 50);
+      const batchResults = await this.dataSource.getQuotes(batch, cacheOpts);
+      results.push(...batchResults);
+    }
+    return results;
   }
   // ═════════════════════════════════════════════════════════════
   // 引擎层执行
   // ═════════════════════════════════════════════════════════════
   /** L1: 市场环境 */
-  async runL1(e, t) {
-    return this.marketAnalyzer.analyze(e, t);
+  async runL1(indices, sectors) {
+    return this.marketAnalyzer.analyze(indices, sectors);
   }
   /** L2: 方向判断 */
-  async runL2(e, t) {
-    return this.directionAnalyzer.analyze(e, t);
+  async runL2(sectors, topics) {
+    return this.directionAnalyzer.analyze(sectors, topics);
   }
   /** L3: 个股分析 */
-  async runL3(e, t, s) {
-    const n = await this.fetchQuotes(e);
-    if (n.length === 0)
-      return h.warn("[Engine] 无法获取个股行情"), [];
-    const r = this.config.maxConcurrent, o = [];
-    for (let c = 0; c < n.length; c += r) {
-      const a = n.slice(c, c + r), u = await this.stockAnalyzer.analyze(a, t, s);
-      o.push(...u);
+  async runL3(stockCodes, indices, sectors) {
+    const quotes = await this.fetchQuotes(stockCodes);
+    if (quotes.length === 0) {
+      logger$1.warn("[Engine] 无法获取个股行情");
+      return [];
     }
-    return o;
+    const maxBatch = this.config.maxConcurrent;
+    const results = [];
+    for (let i = 0; i < quotes.length; i += maxBatch) {
+      const batch = quotes.slice(i, i + maxBatch);
+      const batchResults = await this.stockAnalyzer.analyze(batch, indices, sectors);
+      results.push(...batchResults);
+    }
+    return results;
   }
   /** L4: 结论解析 */
-  async runL4(e, t) {
-    return this.conclusionEngine.process(e, t);
+  async runL4(llmOutput, fallback) {
+    return this.conclusionEngine.process(llmOutput, fallback);
   }
   // ═════════════════════════════════════════════════════════════
   // LLM 调用
@@ -3120,79 +3941,87 @@ class je {
   /**
    * 构建 Prompt 并调用 LLM
    */
-  async callLLM(e, t) {
-    var o, c, a;
-    const s = this.promptBuilder.buildAnalysisPrompt({
-      indices: e.indices,
-      sectors: e.sectors,
-      topics: e.topics,
-      quotes: e.quotes,
-      stocksToAnalyze: e.stocksToAnalyze
+  async callLLM(data, options) {
+    var _a2, _b, _c;
+    const messages = this.promptBuilder.buildAnalysisPrompt({
+      indices: data.indices,
+      sectors: data.sectors,
+      topics: data.topics,
+      quotes: data.quotes,
+      stocksToAnalyze: data.stocksToAnalyze
     });
     if (this.config.enableLocalPreAnalysis) {
-      const u = this.buildLocalAnalysisContext(
-        e.envResult,
-        e.directions,
-        e.stockAnalyses
-      ), l = s[s.length - 1];
-      l.role === "user" && (l.content += `
+      const localContext = this.buildLocalAnalysisContext(
+        data.envResult,
+        data.directions,
+        data.stockAnalyses
+      );
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg.role === "user") {
+        lastMsg.content += `
 
 【本地预处理结果（仅供参考）】
-${u}
+${localContext}
 
-请基于以上信息进行完整四层分析，并输出最终 JSON 结论。`);
+请基于以上信息进行完整四层分析，并输出最终 JSON 结论。`;
+      }
     }
-    let n;
-    const r = t == null ? void 0 : t.signal;
-    return t != null && t.streamCallbacks ? n = (await this.llmClient.chatStream(
-      s,
-      t.streamCallbacks,
-      { signal: r }
-    )).fullContent : n = ((a = (c = (o = (await this.llmClient.chat(s, {
-      signal: r
-    })).choices) == null ? void 0 : o[0]) == null ? void 0 : c.message) == null ? void 0 : a.content) ?? "", n;
+    let llmOutput;
+    const signal = options == null ? void 0 : options.signal;
+    if (options == null ? void 0 : options.streamCallbacks) {
+      const streamResult = await this.llmClient.chatStream(
+        messages,
+        options.streamCallbacks,
+        { signal }
+      );
+      llmOutput = streamResult.fullContent;
+    } else {
+      const response = await this.llmClient.chat(messages, {
+        signal
+      });
+      llmOutput = ((_c = (_b = (_a2 = response.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) ?? "";
+    }
+    return llmOutput;
   }
   /**
    * 构建设本地预处理分析上下文
    * 将 L1/L2/L3 的分析结果转为自然语言，注入 LLM prompt
    */
-  buildLocalAnalysisContext(e, t, s) {
-    const n = [];
-    if (n.push(
-      `[L1 市场环境] 评级: ${e.envLevel} | 情绪: ${e.sentiment} | 建议: ${e.suggestion}`
-    ), t.length > 0) {
-      const r = t.map(
-        (o, c) => `  ${c + 1}. 主线: ${o.mainLine} | 次线: ${o.subLine}`
+  buildLocalAnalysisContext(envResult, directions, stockAnalyses) {
+    const parts = [];
+    parts.push(
+      `[L1 市场环境] 评级: ${envResult.envLevel} | 情绪: ${envResult.sentiment} | 建议: ${envResult.suggestion}`
+    );
+    if (directions.length > 0) {
+      const dirLines = directions.map(
+        (d, i) => `  ${i + 1}. 主线: ${d.mainLine} | 次线: ${d.subLine}`
       );
-      n.push(`[L2 方向判断]
-${r.join(`
-`)}`);
+      parts.push(`[L2 方向判断]
+${dirLines.join("\n")}`);
     }
-    if (s.length > 0) {
-      const r = s.map(
-        (o) => `  ${o.stock}(${o.code}): 位置=${o.position} | 强度=${o.strength} | 量价=${o.volumeAnalysis}`
+    if (stockAnalyses.length > 0) {
+      const stockLines = stockAnalyses.map(
+        (s) => `  ${s.stock}(${s.code}): 位置=${s.position} | 强度=${s.strength} | 量价=${s.volumeAnalysis}`
       );
-      n.push(`[L3 个股技术面]
-${r.join(`
-`)}`);
+      parts.push(`[L3 个股技术面]
+${stockLines.join("\n")}`);
     }
-    return n.join(`
-
-`);
+    return parts.join("\n\n");
   }
   // ═════════════════════════════════════════════════════════════
   // 辅助方法
   // ═════════════════════════════════════════════════════════════
   /** 从行情列表中查找股票名称 */
-  findStockName(e, t) {
-    const s = t.find((n) => n.code === e);
-    return (s == null ? void 0 : s.name) ?? e;
+  findStockName(code, quotes) {
+    const quote = quotes.find((q) => q.code === code);
+    return (quote == null ? void 0 : quote.name) ?? code;
   }
   /**
    * 更新引擎配置
    */
-  setConfig(e) {
-    this.config = { ...this.config, ...e }, this.llmClient.setConfig({
+  setConfig(partial) {
+    this.config = { ...this.config, ...partial };
+    this.llmClient.setConfig({
       model: this.config.model,
       temperature: this.config.temperature,
       maxTokens: this.config.maxTokens
@@ -3205,201 +4034,249 @@ ${r.join(`
     return { ...this.config };
   }
 }
-new je();
-const Ut = "1.0.0", H = new He(), G = new je();
-function Ht() {
-  w.handle("PING", async () => ({ status: "ok", version: Ut })), w.handle("ENV_CHECK", async () => {
-    h.info("[IPC] 环境诊断请求");
-    const i = await G.envCheck(), t = await new Be().analyze(i.sectors, i.topics);
-    return h.info(`[IPC] 环境诊断完成: 级别 ${i.envLevel}`), {
-      envLevel: i.envLevel,
-      sentiment: i.sentiment,
-      suggestion: i.suggestion,
-      indices: i.indices,
-      sectors: i.sectors,
-      topics: i.topics,
-      directions: t
+new AnalysisEngine();
+const SW_VERSION = "1.0.0";
+const eastMoney = new EastMoneyAdapter();
+const analysisEngine = new AnalysisEngine();
+function registerIpcHandlers() {
+  ipcMain.handle("PING", async () => {
+    return { status: "ok", version: SW_VERSION };
+  });
+  ipcMain.handle("ENV_CHECK", async () => {
+    logger$1.info("[IPC] 环境诊断请求");
+    const envResult = await analysisEngine.envCheck();
+    const l2 = new L2DirectionAnalyzer();
+    const directions = await l2.analyze(envResult.sectors, envResult.topics);
+    logger$1.info(`[IPC] 环境诊断完成: 级别 ${envResult.envLevel}`);
+    return {
+      envLevel: envResult.envLevel,
+      sentiment: envResult.sentiment,
+      suggestion: envResult.suggestion,
+      indices: envResult.indices,
+      sectors: envResult.sectors,
+      topics: envResult.topics,
+      directions
     };
-  }), w.handle("ANALYZE_POOL", async (i, e) => {
-    const t = (e == null ? void 0 : e.stocks) ?? [];
-    if (h.info(`[IPC] 股票池分析请求: ${t.length} 只股票`), t.length === 0)
+  });
+  ipcMain.handle("ANALYZE_POOL", async (_event, payload) => {
+    const stockList = (payload == null ? void 0 : payload.stocks) ?? [];
+    logger$1.info(`[IPC] 股票池分析请求: ${stockList.length} 只股票`);
+    if (stockList.length === 0) {
       throw new Error("股票列表为空，请提供待分析的股票代码");
-    if (t.length > 50)
+    }
+    if (stockList.length > 50) {
       throw new Error("单次分析最多支持 50 只股票");
-    const s = await G.analyzePool({ stocks: t });
-    return h.info(`[IPC] 股票池分析完成: ${s.conclusions.length} 条结论`), s;
-  }), w.handle("ANALYZE_SINGLE", async (i, e) => {
-    const t = (e == null ? void 0 : e.stock) ?? "未知", s = (e == null ? void 0 : e.code) ?? "";
-    if (h.info(`[IPC] 单票分析请求: ${t} (${s || "无代码"})`), !s && !t)
+    }
+    const result = await analysisEngine.analyzePool({ stocks: stockList });
+    logger$1.info(`[IPC] 股票池分析完成: ${result.conclusions.length} 条结论`);
+    return result;
+  });
+  ipcMain.handle("ANALYZE_SINGLE", async (_event, payload) => {
+    const stockName = (payload == null ? void 0 : payload.stock) ?? "未知";
+    const stockCode = (payload == null ? void 0 : payload.code) ?? "";
+    logger$1.info(`[IPC] 单票分析请求: ${stockName} (${stockCode || "无代码"})`);
+    if (!stockCode && !stockName) {
       throw new Error("请提供股票代码或名称");
+    }
     return {
       message: "单票分析已实现",
-      stock: t,
-      code: s
+      stock: stockName,
+      code: stockCode
     };
-  }), w.handle("GET_QUOTE", async (i, e) => {
-    const t = (e == null ? void 0 : e.code) ?? "";
-    if (h.info(`[IPC] 行情查询请求: ${t}`), !t)
+  });
+  ipcMain.handle("GET_QUOTE", async (_event, payload) => {
+    const stockCode = (payload == null ? void 0 : payload.code) ?? "";
+    logger$1.info(`[IPC] 行情查询请求: ${stockCode}`);
+    if (!stockCode) {
       throw new Error("请提供股票代码");
-    return await H.getQuote(t);
-  }), w.handle("GET_MARKET", async () => (h.info("[IPC] 大盘数据请求"), await H.getMarketIndex())), w.handle("GET_SECTOR", async (i, e) => {
-    const t = e == null ? void 0 : e.type;
-    switch (h.info(`[IPC] 板块数据请求: type=${t}`), t) {
-      case "sectors":
-        return await H.getSectors();
-      case "detail": {
-        const s = e == null ? void 0 : e.code;
-        if (!s) throw new Error("板块明细查询需要提供 code 参数");
-        return await H.getSectorDetail(s);
+    }
+    const quote = await eastMoney.getQuote(stockCode);
+    return quote;
+  });
+  ipcMain.handle("GET_MARKET", async () => {
+    logger$1.info("[IPC] 大盘数据请求");
+    const indices = await eastMoney.getMarketIndex();
+    return indices;
+  });
+  ipcMain.handle("GET_SECTOR", async (_event, payload) => {
+    const subType = payload == null ? void 0 : payload.type;
+    logger$1.info(`[IPC] 板块数据请求: type=${subType}`);
+    switch (subType) {
+      case "sectors": {
+        const sectors = await eastMoney.getSectors();
+        return sectors;
       }
-      case "topics":
-        return await H.getHotTopics();
+      case "detail": {
+        const code = payload == null ? void 0 : payload.code;
+        if (!code) throw new Error("板块明细查询需要提供 code 参数");
+        const detail = await eastMoney.getSectorDetail(code);
+        return detail;
+      }
+      case "topics": {
+        const topics = await eastMoney.getHotTopics();
+        return topics;
+      }
       default:
-        throw new Error(`未知的 GET_SECTOR 子命令: ${t}`);
+        throw new Error(`未知的 GET_SECTOR 子命令: ${subType}`);
     }
   });
 }
-async function Bt(i, e) {
-  const t = (e == null ? void 0 : e.stocks) ?? [];
-  if (h.info(`[IPC-Stream] 流式股票池分析: ${t.length} 只`), t.length === 0) {
-    i.webContents.send("stream:event", {
+async function startStreamPoolAnalysis(win, payload) {
+  const stocks = (payload == null ? void 0 : payload.stocks) ?? [];
+  logger$1.info(`[IPC-Stream] 流式股票池分析: ${stocks.length} 只`);
+  if (stocks.length === 0) {
+    win.webContents.send("stream:event", {
       event: "stream:error",
       data: "股票列表为空"
     });
     return;
   }
   try {
-    V(i, "fetching", "正在获取市场数据...", 5);
-    const s = await G.analyzePool({
-      stocks: t,
+    sendProgress(win, "fetching", "正在获取市场数据...", 5);
+    const result = await analysisEngine.analyzePool({
+      stocks,
       streamCallbacks: {
-        onChunk: (n) => {
-          var o, c, a;
-          const r = ((a = (c = (o = n.choices) == null ? void 0 : o[0]) == null ? void 0 : c.delta) == null ? void 0 : a.content) ?? "";
-          r && i.webContents.send("stream:event", {
-            event: "stream:chunk",
-            data: r
-          });
+        onChunk: (_chunk) => {
+          var _a2, _b, _c;
+          const content = ((_c = (_b = (_a2 = _chunk.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b.delta) == null ? void 0 : _c.content) ?? "";
+          if (content) {
+            win.webContents.send("stream:event", {
+              event: "stream:chunk",
+              data: content
+            });
+          }
         }
       }
     });
-    i.webContents.send("stream:event", {
+    win.webContents.send("stream:event", {
       event: "stream:env-level",
-      data: s.marketEnv
-    }), V(i, "l4", "正在生成结论...", 90);
-    for (const n of s.conclusions)
-      i.webContents.send("stream:event", {
+      data: result.marketEnv
+    });
+    sendProgress(win, "l4", "正在生成结论...", 90);
+    for (const c of result.conclusions) {
+      win.webContents.send("stream:event", {
         event: "stream:conclusion",
         data: {
-          stockCode: n.stockCode,
-          stockName: n.stockName,
-          verdict: n.verdict,
-          reason: n.reason,
-          riskPoints: n.riskPoints,
-          priority: n.priority
+          stockCode: c.stockCode,
+          stockName: c.stockName,
+          verdict: c.verdict,
+          reason: c.reason,
+          riskPoints: c.riskPoints,
+          priority: c.priority
         }
       });
-    V(i, "done", "分析完成", 100), i.webContents.send("stream:event", {
+    }
+    sendProgress(win, "done", "分析完成", 100);
+    win.webContents.send("stream:event", {
       event: "stream:done",
-      data: s
-    }), h.info(`[IPC-Stream] 流式分析完成: ${t.length} 只股票`);
-  } catch (s) {
-    const n = s instanceof Error ? s.message : String(s);
-    h.error("[IPC-Stream] 流式分析错误:", n), i.webContents.send("stream:event", {
+      data: result
+    });
+    logger$1.info(`[IPC-Stream] 流式分析完成: ${stocks.length} 只股票`);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger$1.error("[IPC-Stream] 流式分析错误:", errMsg);
+    win.webContents.send("stream:event", {
       event: "stream:error",
-      data: n
+      data: errMsg
     });
   }
 }
-async function zt(i, e) {
-  const t = (e == null ? void 0 : e.code) ?? (e == null ? void 0 : e.stock) ?? "";
-  if (h.info(`[IPC-Stream] 流式单票分析: ${t}`), !t) {
-    i.webContents.send("stream:event", {
+async function startStreamSingleAnalysis(win, payload) {
+  const code = (payload == null ? void 0 : payload.code) ?? (payload == null ? void 0 : payload.stock) ?? "";
+  logger$1.info(`[IPC-Stream] 流式单票分析: ${code}`);
+  if (!code) {
+    win.webContents.send("stream:event", {
       event: "stream:error",
       data: "请提供股票代码"
     });
     return;
   }
   try {
-    V(i, "fetching", "正在获取数据...", 10);
-    const s = await G.analyzeSingle({
-      code: t,
+    sendProgress(win, "fetching", "正在获取数据...", 10);
+    const result = await analysisEngine.analyzeSingle({
+      code,
       streamCallbacks: {
-        onChunk: (n) => {
-          var o, c, a;
-          const r = ((a = (c = (o = n.choices) == null ? void 0 : o[0]) == null ? void 0 : c.delta) == null ? void 0 : a.content) ?? "";
-          r && i.webContents.send("stream:event", {
-            event: "stream:chunk",
-            data: r
-          });
+        onChunk: (_chunk) => {
+          var _a2, _b, _c;
+          const content = ((_c = (_b = (_a2 = _chunk.choices) == null ? void 0 : _a2[0]) == null ? void 0 : _b.delta) == null ? void 0 : _c.content) ?? "";
+          if (content) {
+            win.webContents.send("stream:event", {
+              event: "stream:chunk",
+              data: content
+            });
+          }
         }
       }
     });
-    i.webContents.send("stream:event", {
+    win.webContents.send("stream:event", {
       event: "stream:env-level",
-      data: s.marketEnv
+      data: result.marketEnv
     });
-    for (const n of s.conclusions)
-      i.webContents.send("stream:event", {
+    for (const c of result.conclusions) {
+      win.webContents.send("stream:event", {
         event: "stream:conclusion",
         data: {
-          stockCode: n.stockCode,
-          stockName: n.stockName,
-          verdict: n.verdict,
-          reason: n.reason,
-          riskPoints: n.riskPoints,
-          priority: n.priority
+          stockCode: c.stockCode,
+          stockName: c.stockName,
+          verdict: c.verdict,
+          reason: c.reason,
+          riskPoints: c.riskPoints,
+          priority: c.priority
         }
       });
-    i.webContents.send("stream:event", {
+    }
+    win.webContents.send("stream:event", {
       event: "stream:done",
-      data: s
-    }), h.info(`[IPC-Stream] 流式单票分析完成: ${t}`);
-  } catch (s) {
-    const n = s instanceof Error ? s.message : String(s);
-    h.error("[IPC-Stream] 流式分析错误:", n), i.webContents.send("stream:event", {
+      data: result
+    });
+    logger$1.info(`[IPC-Stream] 流式单票分析完成: ${code}`);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger$1.error("[IPC-Stream] 流式分析错误:", errMsg);
+    win.webContents.send("stream:event", {
       event: "stream:error",
-      data: n
+      data: errMsg
     });
   }
 }
-function V(i, e, t, s) {
-  const n = { stage: e, message: t, percent: s };
-  i.webContents.send("stream:event", {
+function sendProgress(win, stage, message, percent) {
+  const progress = { stage, message, percent };
+  win.webContents.send("stream:event", {
     event: "stream:progress",
-    data: n
+    data: progress
   });
 }
-function Ft() {
-  w.on("stream:start", (i, e) => {
-    const t = ce.fromWebContents(i.sender);
-    if (!t) return;
-    const { type: s, payload: n } = e;
-    switch (s) {
+function registerStreamIpcHandlers() {
+  ipcMain.on("stream:start", (event, payload) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return;
+    const { type, payload: data } = payload;
+    switch (type) {
       case "ANALYZE_POOL_STREAM":
-        Bt(t, n);
+        startStreamPoolAnalysis(win, data);
         break;
       case "ANALYZE_SINGLE_STREAM":
-        zt(t, n);
+        startStreamSingleAnalysis(win, data);
         break;
       default:
-        t.webContents.send("stream:event", {
+        win.webContents.send("stream:event", {
           event: "stream:error",
-          data: `未知流式类型: ${s}`
+          data: `未知流式类型: ${type}`
         });
     }
   });
 }
-const Kt = {
+const DEFAULT_SETTINGS = {
   model: "deepseek-chat",
   temperature: 0.7,
   maxTokens: 4096,
-  autoAnalyze: !1,
+  autoAnalyze: false,
   maxConcurrent: 3,
-  debugMode: !1
-}, B = {
+  debugMode: false
+};
+const DEFAULT_DATA = {
   api_key: "",
-  settings: { ...Kt },
+  settings: { ...DEFAULT_SETTINGS },
   watchlist: [],
   history: [],
   meta: {
@@ -3408,170 +4285,271 @@ const Kt = {
   },
   cache: {}
 };
-class jt {
+class FileStore {
   constructor() {
-    this.dirty = !1, this.saveTimer = null;
-    const e = P.getPath("userData");
-    this.filePath = R.join(e, "xvqiu-data.json"), this.data = this.load();
+    this.dirty = false;
+    this.saveTimer = null;
+    const userDataPath = app.getPath("userData");
+    this.filePath = path.join(userDataPath, "xvqiu-data.json");
+    this.data = this.load();
   }
   // ─── 文件读写 ──────────────────────────────────
   load() {
     try {
-      if (O.existsSync(this.filePath)) {
-        const e = O.readFileSync(this.filePath, "utf-8"), t = JSON.parse(e);
-        return { ...B, ...t };
+      if (fs.existsSync(this.filePath)) {
+        const raw = fs.readFileSync(this.filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        return { ...DEFAULT_DATA, ...parsed };
       }
-    } catch (e) {
-      console.error("[FileStore] 读取失败，使用默认值:", e);
+    } catch (err) {
+      console.error("[FileStore] 读取失败，使用默认值:", err);
     }
-    return { ...B, meta: { ...B.meta } };
+    return { ...DEFAULT_DATA, meta: { ...DEFAULT_DATA.meta } };
   }
   save() {
     try {
-      const e = R.dirname(this.filePath);
-      O.existsSync(e) || O.mkdirSync(e, { recursive: !0 }), O.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf-8"), this.dirty = !1;
-    } catch (e) {
-      console.error("[FileStore] 写入失败:", e);
+      const dir = path.dirname(this.filePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
+      this.dirty = false;
+    } catch (err) {
+      console.error("[FileStore] 写入失败:", err);
     }
   }
   scheduleSave() {
-    this.dirty = !0, this.saveTimer && clearTimeout(this.saveTimer), this.saveTimer = setTimeout(() => {
-      this.dirty && this.save();
+    this.dirty = true;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      if (this.dirty) this.save();
     }, 500);
   }
   // ─── 通用读写 ──────────────────────────────────
-  get(e) {
-    return this.data[e];
+  get(key) {
+    return this.data[key];
   }
-  set(e, t) {
-    this.data[e] = t, this.scheduleSave();
+  set(key, value) {
+    this.data[key] = value;
+    this.scheduleSave();
   }
-  remove(e) {
-    delete this.data[e], this.scheduleSave();
+  remove(key) {
+    delete this.data[key];
+    this.scheduleSave();
   }
-  has(e) {
-    return e in this.data;
+  has(key) {
+    return key in this.data;
   }
   getAll() {
     return { ...this.data };
   }
   resetAll() {
-    this.data = { ...B, meta: { ...B.meta } }, this.save();
+    this.data = { ...DEFAULT_DATA, meta: { ...DEFAULT_DATA.meta } };
+    this.save();
   }
   // ─── 缓存 ──────────────────────────────────────
-  getCache(e) {
-    const t = this.data.cache[e];
-    return t ? Date.now() - t.timestamp > t.ttl ? (delete this.data.cache[e], this.scheduleSave(), null) : t.data : null;
+  getCache(name) {
+    const entry = this.data.cache[name];
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      delete this.data.cache[name];
+      this.scheduleSave();
+      return null;
+    }
+    return entry.data;
   }
-  setCache(e, t, s = 3e4) {
-    this.data.cache[e] = { data: t, timestamp: Date.now(), ttl: s }, this.scheduleSave();
+  setCache(name, data, ttl = 3e4) {
+    this.data.cache[name] = { data, timestamp: Date.now(), ttl };
+    this.scheduleSave();
   }
-  removeCache(e) {
-    delete this.data.cache[e], this.scheduleSave();
+  removeCache(name) {
+    delete this.data.cache[name];
+    this.scheduleSave();
   }
   clearCache() {
-    this.data.cache = {}, this.scheduleSave();
+    this.data.cache = {};
+    this.scheduleSave();
   }
   // ─── 历史记录 ──────────────────────────────────
-  getHistory(e) {
-    let t = [...this.data.history];
-    (e == null ? void 0 : e.from) !== void 0 && (t = t.filter((r) => r.createdAt >= e.from)), (e == null ? void 0 : e.to) !== void 0 && (t = t.filter((r) => r.createdAt <= e.to)), e != null && e.verdict && (t = t.filter(
-      (r) => r.result.conclusions.some((o) => o.verdict === e.verdict)
-    )), t.sort((r, o) => o.createdAt - r.createdAt);
-    const s = (e == null ? void 0 : e.offset) ?? 0, n = (e == null ? void 0 : e.limit) ?? t.length;
-    return t.slice(s, s + n);
+  getHistory(options) {
+    let filtered = [...this.data.history];
+    if ((options == null ? void 0 : options.from) !== void 0) {
+      filtered = filtered.filter((r) => r.createdAt >= options.from);
+    }
+    if ((options == null ? void 0 : options.to) !== void 0) {
+      filtered = filtered.filter((r) => r.createdAt <= options.to);
+    }
+    if (options == null ? void 0 : options.verdict) {
+      filtered = filtered.filter(
+        (r) => r.result.conclusions.some((c) => c.verdict === options.verdict)
+      );
+    }
+    filtered.sort((a, b) => b.createdAt - a.createdAt);
+    const offset = (options == null ? void 0 : options.offset) ?? 0;
+    const limit = (options == null ? void 0 : options.limit) ?? filtered.length;
+    return filtered.slice(offset, offset + limit);
   }
-  addHistory(e, t, s) {
-    const n = this.generateId(), r = {
-      id: n,
+  addHistory(record, note, tags) {
+    const id = this.generateId();
+    const entry = {
+      id,
       createdAt: Date.now(),
-      note: t,
-      tags: s,
-      result: e
+      note,
+      tags,
+      result: record
     };
-    return this.data.history.push(r), this.data.history.length > 500 && (this.data.history = this.data.history.slice(-500)), this.scheduleSave(), n;
+    this.data.history.push(entry);
+    if (this.data.history.length > 500) {
+      this.data.history = this.data.history.slice(-500);
+    }
+    this.scheduleSave();
+    return id;
   }
-  removeHistory(e) {
-    const t = this.data.history.findIndex((s) => s.id === e);
-    return t === -1 ? !1 : (this.data.history.splice(t, 1), this.scheduleSave(), !0);
+  removeHistory(id) {
+    const idx = this.data.history.findIndex((r) => r.id === id);
+    if (idx === -1) return false;
+    this.data.history.splice(idx, 1);
+    this.scheduleSave();
+    return true;
   }
   clearHistory() {
-    this.data.history = [], this.scheduleSave();
+    this.data.history = [];
+    this.scheduleSave();
   }
   // ─── 元数据 ──────────────────────────────────
-  setMeta(e, t) {
-    this.data.meta[e] = t, this.scheduleSave();
+  setMeta(name, value) {
+    this.data.meta[name] = value;
+    this.scheduleSave();
   }
-  getMeta(e) {
-    return this.data.meta[e];
+  getMeta(name) {
+    return this.data.meta[name];
   }
-  removeMeta(e) {
-    delete this.data.meta[e], this.scheduleSave();
+  removeMeta(name) {
+    delete this.data.meta[name];
+    this.scheduleSave();
   }
   // ─── 工具 ────────────────────────────────────
   generateId() {
-    const e = "0123456789abcdef";
-    return [8, 4, 4, 4, 12].map((s) => {
-      let n = "";
-      for (let r = 0; r < s; r++)
-        n += e[Math.floor(Math.random() * 16)];
-      return n;
+    const chars = "0123456789abcdef";
+    const sections = [8, 4, 4, 4, 12];
+    return sections.map((len) => {
+      let s = "";
+      for (let i = 0; i < len; i++) {
+        s += chars[Math.floor(Math.random() * 16)];
+      }
+      return s;
     }).join("-");
   }
   close() {
-    this.saveTimer && clearTimeout(this.saveTimer), this.dirty && this.save();
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+    }
+    if (this.dirty) {
+      this.save();
+    }
   }
 }
-let ie = null;
-function le() {
-  return ie || (ie = new jt()), ie;
+let storeInstance = null;
+function getStore() {
+  if (!storeInstance) {
+    storeInstance = new FileStore();
+  }
+  return storeInstance;
 }
-function ue(i, ...e) {
-  console.log(`[Main] ${i}`, ...e);
+function logger(info, ...args) {
+  console.log(`[Main] ${info}`, ...args);
 }
-const Wt = Ye(import.meta.url), oe = R.dirname(Wt), xe = !P.isPackaged, We = "xvqiu - A股短线交易决策助手";
-let _ = null;
-function Re() {
-  _ = new ce({
-    title: We,
-    icon: R.join(oe, "../icons/icon-128.png"),
+const __filename$1 = fileURLToPath(import.meta.url);
+const __dirname$1 = path.dirname(__filename$1);
+const isDev = !app.isPackaged;
+const APP_NAME = "xvqiu - A股短线交易决策助手";
+let mainWindow = null;
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    title: APP_NAME,
+    icon: path.join(__dirname$1, "../icons/icon-128.png"),
     width: 420,
     height: 720,
     minWidth: 360,
     minHeight: 500,
-    resizable: !0,
-    frame: !0,
+    resizable: true,
+    frame: true,
     titleBarStyle: "default",
     webPreferences: {
-      preload: R.join(oe, "preload.js"),
-      contextIsolation: !0,
-      nodeIntegration: !1,
-      sandbox: !1
+      preload: path.join(__dirname$1, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
     }
-  }), xe ? (_.loadURL("http://localhost:5173/"), _.webContents.openDevTools({ mode: "detach" })) : _.loadFile(R.join(oe, "../dist/index.html")), _.on("closed", () => {
-    _ = null;
-  }), _.webContents.setWindowOpenHandler(({ url: i }) => i.startsWith("https://platform.deepseek.com") ? { action: "allow" } : { action: "deny" }), ue(`窗口已创建 (${xe ? "开发" : "生产"}模式)`);
+  });
+  if (isDev) {
+    mainWindow.loadURL("http://localhost:5173/");
+    mainWindow.webContents.openDevTools({ mode: "detach" });
+  } else {
+    mainWindow.loadFile(path.join(__dirname$1, "../dist/index.html"));
+  }
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("https://platform.deepseek.com")) {
+      return { action: "allow" };
+    }
+    return { action: "deny" };
+  });
+  logger(`窗口已创建 (${isDev ? "开发" : "生产"}模式)`);
 }
-function Yt() {
-  const i = le();
-  w.handle("store:get", (e, t) => i.get(t)), w.handle("store:set", (e, t, s) => {
-    i.set(t, s);
-  }), w.handle("store:remove", (e, t) => {
-    i.remove(t);
-  }), w.handle("store:getWatchlist", () => i.get("watchlist") ?? []), w.handle("store:setWatchlist", (e, t) => {
-    i.set("watchlist", t);
-  }), w.handle("store:getHistory", (e, t) => i.getHistory(t)), w.handle("store:addHistory", (e, t, s, n) => i.addHistory(t, s, n)), w.handle("store:removeHistory", (e, t) => i.removeHistory(t)), w.handle("store:clearHistory", () => {
-    i.clearHistory();
-  }), ue("Storage IPC handlers 已注册");
+function registerStoreIpcHandlers() {
+  const store = getStore();
+  ipcMain.handle("store:get", (_event, key) => {
+    return store.get(key);
+  });
+  ipcMain.handle("store:set", (_event, key, value) => {
+    store.set(key, value);
+  });
+  ipcMain.handle("store:remove", (_event, key) => {
+    store.remove(key);
+  });
+  ipcMain.handle("store:getWatchlist", () => {
+    return store.get("watchlist") ?? [];
+  });
+  ipcMain.handle("store:setWatchlist", (_event, list) => {
+    store.set("watchlist", list);
+  });
+  ipcMain.handle("store:getHistory", (_event, options) => {
+    return store.getHistory(options);
+  });
+  ipcMain.handle("store:addHistory", (_event, record, note, tags) => {
+    return store.addHistory(record, note, tags);
+  });
+  ipcMain.handle("store:removeHistory", (_event, id) => {
+    return store.removeHistory(id);
+  });
+  ipcMain.handle("store:clearHistory", () => {
+    store.clearHistory();
+  });
+  logger("Storage IPC handlers 已注册");
 }
-P.whenReady().then(() => {
-  ue(`${We} 启动中...`), Ht(), Ft(), Yt(), Re(), P.on("activate", () => {
-    ce.getAllWindows().length === 0 && Re();
+app.whenReady().then(() => {
+  logger(`${APP_NAME} 启动中...`);
+  registerIpcHandlers();
+  registerStreamIpcHandlers();
+  registerStoreIpcHandlers();
+  createWindow();
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
   });
 });
-P.on("window-all-closed", () => {
-  process.platform !== "darwin" && (le().close(), P.quit());
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") {
+    const store = getStore();
+    store.close();
+    app.quit();
+  }
 });
-P.on("before-quit", () => {
-  le().close();
+app.on("before-quit", () => {
+  const store = getStore();
+  store.close();
 });

@@ -1,38 +1,45 @@
-import { contextBridge as n, ipcRenderer as t } from "electron";
-n.exposeInMainWorld("electronAPI", {
+import { contextBridge, ipcRenderer } from "electron";
+contextBridge.exposeInMainWorld("electronAPI", {
   // ─── 通用 invoke ────────────────────────────
-  invoke: (e, ...r) => [
-    "PING",
-    "ENV_CHECK",
-    "ANALYZE_POOL",
-    "ANALYZE_SINGLE",
-    "GET_QUOTE",
-    "GET_MARKET",
-    "GET_SECTOR"
-  ].includes(e) ? t.invoke(e, ...r) : Promise.reject(new Error(`不允许的 IPC 频道: ${e}`)),
+  invoke: (channel, ...args) => {
+    const allowedChannels = [
+      "PING",
+      "ENV_CHECK",
+      "ANALYZE_POOL",
+      "ANALYZE_SINGLE",
+      "GET_QUOTE",
+      "GET_MARKET",
+      "GET_SECTOR"
+    ];
+    if (allowedChannels.includes(channel)) {
+      return ipcRenderer.invoke(channel, ...args);
+    }
+    return Promise.reject(new Error(`不允许的 IPC 频道: ${channel}`));
+  },
   // ─── 流式事件 ───────────────────────────────
-  onStreamEvent: (e) => {
-    const r = (o, s) => {
-      e(s);
+  onStreamEvent: (callback) => {
+    const handler = (_event, data) => {
+      callback(data);
     };
-    return t.on("stream:event", r), () => {
-      t.removeListener("stream:event", r);
+    ipcRenderer.on("stream:event", handler);
+    return () => {
+      ipcRenderer.removeListener("stream:event", handler);
     };
   },
   // ─── 启动流式分析 ─────────────────────────
-  startStream: (e, r) => {
-    t.send("stream:start", { type: e, payload: r });
+  startStream: (type, payload) => {
+    ipcRenderer.send("stream:start", { type, payload });
   },
   // ─── 存储 ────────────────────────────────────
   store: {
-    get: (e) => t.invoke("store:get", e),
-    set: (e, r) => t.invoke("store:set", e, r),
-    remove: (e) => t.invoke("store:remove", e),
-    getWatchlist: () => t.invoke("store:getWatchlist"),
-    setWatchlist: (e) => t.invoke("store:setWatchlist", e),
-    getHistory: (e) => t.invoke("store:getHistory", e),
-    addHistory: (e, r, o) => t.invoke("store:addHistory", e, r, o),
-    removeHistory: (e) => t.invoke("store:removeHistory", e),
-    clearHistory: () => t.invoke("store:clearHistory")
+    get: (key) => ipcRenderer.invoke("store:get", key),
+    set: (key, value) => ipcRenderer.invoke("store:set", key, value),
+    remove: (key) => ipcRenderer.invoke("store:remove", key),
+    getWatchlist: () => ipcRenderer.invoke("store:getWatchlist"),
+    setWatchlist: (list) => ipcRenderer.invoke("store:setWatchlist", list),
+    getHistory: (options) => ipcRenderer.invoke("store:getHistory", options),
+    addHistory: (record, note, tags) => ipcRenderer.invoke("store:addHistory", record, note, tags),
+    removeHistory: (id) => ipcRenderer.invoke("store:removeHistory", id),
+    clearHistory: () => ipcRenderer.invoke("store:clearHistory")
   }
 });
