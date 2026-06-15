@@ -245,7 +245,7 @@ export class AnalysisEngine {
     indices: MarketIndex[];
     sectors: SectorData[];
     topics: HotTopic[];
-    sentiment: SentimentData | null;
+    clsSentiment: SentimentData | null;
   }> {
     logger.info('[Engine] 环境诊断（增强版）');
 
@@ -277,24 +277,24 @@ export class AnalysisEngine {
 
       // 解析 LLM 输出中的增强字段
       if (llmOutput) {
-        const enhancedResult = this.conclusionEngine.process(llmOutput, {
+        const enhancedResult = await this.conclusionEngine.process(llmOutput, {
           envLevel: envResult.envLevel,
         });
 
         // 合并增强字段
-        if (enhancedResult.marketEnv.todayAction) {
+        if (enhancedResult.marketEnv?.todayAction) {
           (envResult as any).todayAction = enhancedResult.marketEnv.todayAction;
         }
-        if (enhancedResult.marketEnv.avoidType) {
+        if (enhancedResult.marketEnv?.avoidType) {
           (envResult as any).avoidType = enhancedResult.marketEnv.avoidType;
         }
-        if (enhancedResult.marketEnv.certainDirections) {
+        if (enhancedResult.marketEnv?.certainDirections) {
           (envResult as any).certainDirections = enhancedResult.marketEnv.certainDirections;
         }
-        if (enhancedResult.marketEnv.sentiment) {
+        if (enhancedResult.marketEnv?.sentiment) {
           (envResult as any).sentiment = enhancedResult.marketEnv.sentiment;
         }
-        if (enhancedResult.marketEnv.suggestion) {
+        if (enhancedResult.marketEnv?.suggestion) {
           (envResult as any).suggestion = enhancedResult.marketEnv.suggestion;
         }
       }
@@ -308,7 +308,7 @@ export class AnalysisEngine {
       indices: marketData.indices,
       sectors: marketData.sectors,
       topics: marketData.topics,
-      sentiment: marketData.sentiment,
+      clsSentiment: marketData.sentiment,
     };
   }
 

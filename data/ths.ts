@@ -286,7 +286,7 @@ export class ThsAdapter {
     code: string,
     options?: FetchOptions,
   ): Promise<MarketIndex> {
-    const url = `${API_BASE}/index_${code}/last.js`;
+    const url = `${API_BASE}/hs_${code}/last.js`;
     const raw = await this.fetchRealhead(url, {
       useCache: true,
       ttl: INDEX_TTL,
