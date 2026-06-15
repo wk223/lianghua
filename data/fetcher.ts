@@ -129,6 +129,50 @@ export class DataFetcher {
     }
   }
 
+  /**
+   * 发起 HTTP 请求，返回文本内容（集成缓存 + 限速 + 重试）
+   * 适用于 JSONP 或非标准 JSON 响应
+   */
+  async fetchRawText(
+    url: string,
+    options: FetchOptions = {},
+  ): Promise<string> {
+    this.stats.totalRequests++;
+
+    const {
+      useCache = true,
+      ttl = DEFAULT_TTL,
+      timeout = DEFAULT_TIMEOUT,
+      retry = DEFAULT_RETRY,
+      headers = {},
+    } = options;
+
+    // —— 缓存检查 ——
+    if (useCache) {
+      const cached = this.getFromCache<string>(url);
+      if (cached !== null) {
+        this.stats.cacheHits++;
+        return cached;
+      }
+    }
+    this.stats.cacheMisses++;
+
+    // —— 执行请求 ——
+    try {
+      const data = await this.executeWithRawRetry(url, timeout, retry, headers);
+
+      // —— 写入缓存 ——
+      if (useCache) {
+        this.setCache(url, data, ttl);
+      }
+
+      return data;
+    } catch (err) {
+      this.stats.failedRequests++;
+      throw err;
+    }
+  }
+
   // ─── 缓存管理 ──────────────────────────────────────────
 
   /** 清空所有缓存 */
@@ -198,9 +242,10 @@ export class DataFetcher {
           const response = await fetch(url, {
             signal: controller.signal,
             headers: {
-              'Accept': 'application/json',
+              'Accept': 'application/json, text/plain, */*',
               'Accept-Language': 'zh-CN,zh;q=0.9',
-              'Referer': 'https://quote.eastmoney.com/',
+              'Referer': 'https://q.10jqka.com.cn/',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
               ...headers,
             },
           });
@@ -276,6 +321,70 @@ export class DataFetcher {
     }
 
     this.processingQueue = false;
+  }
+
+  /**
+   * 执行带速率限制的文本请求（不进行 JSON 解析）
+   */
+  private async executeWithRawRetry(
+    url: string,
+    timeout: number,
+    retry: number,
+    headers: Record<string, string>,
+  ): Promise<string> {
+    await this.enqueue();
+
+    return withRetry(
+      async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+
+        try {
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              'Accept': 'application/json, text/plain, */*',
+              'Accept-Language': 'zh-CN,zh;q=0.9',
+              'Referer': 'https://q.10jqka.com.cn/',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              ...headers,
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(
+              `HTTP ${response.status}: ${response.statusText} (${url})`,
+            );
+          }
+
+          const text = await response.text();
+
+          if (!text || text.trim().length === 0) {
+            throw new Error('同花顺 API 返回空数据');
+          }
+
+          return text;
+        } catch (err: unknown) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            throw new Error(`请求超时 (${timeout}ms): ${url}`);
+          }
+          throw err;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      {
+        maxRetries: retry,
+        baseDelay: 500,
+        maxDelay: 5000,
+        onRetry: (error, attempt) => {
+          console.warn(
+            `[DataFetcher] 重试 #${attempt + 1}/${retry}: ${url}`,
+            error.message,
+          );
+        },
+      },
+    );
   }
 
   // ─── 缓存操作 ──────────────────────────────────────────

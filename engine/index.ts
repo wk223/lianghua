@@ -28,8 +28,8 @@ import { L4ConclusionEngine } from './l4-conclusion';
 
 import { PromptBuilder } from '../prompts/builders';
 import { DeepSeekClient } from '../llm/client';
-import { EastMoneyAdapter } from '../data/eastmoney';
-import { CacheManager, cacheManager, CACHE_KEYS } from '../data/cache';
+import { ThsAdapter } from '../data/ths';
+import { CacheManager, cacheManager } from '../data/cache';
 
 import type {
   AnalysisResult,
@@ -113,7 +113,7 @@ export class AnalysisEngine {
   private stockAnalyzer: L3StockAnalyzer;
   private conclusionEngine: L4ConclusionEngine;
   private promptBuilder: PromptBuilder;
-  private dataSource: EastMoneyAdapter;
+  private dataSource: ThsAdapter;
   private llmClient: DeepSeekClient;
   private cache: CacheManager;
 
@@ -125,7 +125,7 @@ export class AnalysisEngine {
       stockAnalyzer?: L3StockAnalyzer;
       conclusionEngine?: L4ConclusionEngine;
       promptBuilder?: PromptBuilder;
-      dataSource?: EastMoneyAdapter;
+      dataSource?: ThsAdapter;
       llmClient?: DeepSeekClient;
       cache?: CacheManager;
     },
@@ -136,7 +136,7 @@ export class AnalysisEngine {
     this.stockAnalyzer = deps?.stockAnalyzer ?? new L3StockAnalyzer();
     this.conclusionEngine = deps?.conclusionEngine ?? new L4ConclusionEngine();
     this.promptBuilder = deps?.promptBuilder ?? new PromptBuilder();
-    this.dataSource = deps?.dataSource ?? new EastMoneyAdapter();
+    this.dataSource = deps?.dataSource ?? new ThsAdapter();
     this.llmClient = deps?.llmClient ?? new DeepSeekClient();
     this.cache = deps?.cache ?? cacheManager;
   }

@@ -42,103 +42,59 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   windowMs: 1000, // 5 req / sec
 };
 
-// ─── 东方财富 API 原始响应 ────────────────────────────
+// ─── 同花顺 (10jqka) API 原始响应 ──────────────────────
 
 /**
- * 东方财富 API 统一响应外层结构
+ * 同花顺 realhead API 响应结构
  *
- * 个股行情: { rc: 0, rt: 7, data: EastMoneyStockRaw }
- * 批量行情: { rc: 0, rt: 7, data: { total: number, diff: EastMoneyStockRaw[] } }
+ * JSONP 包裹: quotebridge_v2_realhead_hs_{code}_last({...})
+ * 实际解析时去除 JSONP 回调外层
+ *
+ * 个股: d.10jqka.com.cn/v2/realhead/hs_{code}/last.js
+ * 指数: d.10jqka.com.cn/v2/realhead/index_{code}/last.js
  */
-export interface EastMoneyApiResponse<T> {
-  rc: number;        // 返回码，0 表示成功
-  rt: number;        // 返回码 2
-  svr: number;       // 服务器 ID
-  lt: number;        // 时间戳
-  full: number;      // 是否全量
-  data: T | null;
-}
-
-/** 东方财富原始个股行情字段（f 开头数字字段） */
-export interface EastMoneyStockRaw {
-  f43: number | null;   // 最新价
-  f44: number | null;   // 最高价
-  f45: number | null;   // 最低价
-  f46: number | null;   // 开盘价
-  f47: number | null;   // 成交量（手）
-  f48: number | null;   // 成交额（元）
-  f49: number | null;   // 振幅 %
-  f50: number | null;   // 换手率 %
-  f51: number | null;   // 量比
-  f52: number | null;   // 涨跌额
-  f55: number | null;   // 涨跌幅 %
-  f57: string | null;   // 股票代码
-  f58: string | null;   // 股票名称
-  f60: number | null;   // 昨收价
-  f116: number | null;  // 总市值
-  f117: number | null;  // 流通市值
-  f162: number | null;  // 市盈率(动态)
-  f167: number | null;  // 市净率
+export interface ThsRealheadResponse {
+  /** 数值字段映射 (数字键 → 字符串值) */
+  items: Record<string, string>;
+  /** 股票/指数名称 */
+  name?: string;
+  /** 停牌状态: 0=正常 */
+  stop?: number;
+  /** 行情时间 */
+  time?: string;
+  /** 市场类型 (如 HS_stock_sh) */
+  marketType?: string;
+  /** 股票代码 (外层冗余) */
+  "5"?: string;
+  /** 股票状态 */
+  stockStatus?: string;
   [key: string]: unknown;
 }
 
-/** 东方财富原始指数行情字段 */
-export interface EastMoneyIndexRaw {
-  f43: number | null;   // 当前点位
-  f44: number | null;   // 最高点位
-  f45: number | null;   // 最低点位
-  f46: number | null;   // 开盘点位
-  f47: number | null;   // 成交量（手）
-  f48: number | null;   // 成交额（元）
-  f50: number | null;   // 换手率（指数专用）
-  f52: number | null;   // 涨跌额
-  f55: number | null;   // 涨跌幅 %
-  f57: string | null;   // 指数代码
-  f58: string | null;   // 指数名称
-  f60: number | null;   // 昨收点位
-  f62: number | null;   // 上涨家数
-  f115: number | null;  // 下跌家数
-  f128: number | null;  // 领涨股票代码
-  f140: number | null;  // 领涨股票名称
-  f169: number | null;  // 上市天数
-  f170: number | null;  // 总股本
-  f171: number | null;  // 流通股本
-  [key: string]: unknown;
-}
-
-/** 批量列表响应数据 */
-export interface EastMoneyListData<T> {
-  total: number;
-  diff: T[];
-}
-
-/** 东方财富原始板块/概念行情字段 */
-export interface EastMoneySectorRaw {
-  f2: number | null;    // 板块指数值
-  f3: number | null;    // 涨跌幅 %
-  f4: number | null;    // 涨跌额
-  f12: string | null;   // 板块代码 (BKxxxx)
-  f14: string | null;   // 板块名称
-  f20: number | null;   // 总市值
-  f62: number | null;   // 领涨股代码(数字)
-  f104: string | null;  // 领涨股名称
-  f128: number | null;  // 领涨股涨跌幅 %
-  f140: number | null;  // 上涨家数
-  f141: number | null;  // 下跌家数
-  f142: number | null;  // 资金净流入(万元)
-  [key: string]: unknown;
-}
-
-/** 东方财富板块成分股原始字段 */
-export interface EastMoneySectorStockRaw {
-  f2: number | null;    // 最新价
-  f3: number | null;    // 涨跌幅 %
-  f4: number | null;    // 涨跌额
-  f5: number | null;    // 成交量（手）
-  f6: number | null;    // 成交额（元）
-  f12: string | null;   // 股票代码
-  f14: string | null;   // 股票名称
-  [key: string]: unknown;
+/**
+ * 同花顺板块/行业行情行 (从 q.10jqka.com.cn HTML 解析)
+ *
+ * HTML 表格列顺序:
+ * 序号 | 名称 | 涨幅(%) | 总成交额(亿) | 总成交额(元) | 资金流入(万) |
+ * 上涨家数 | 下跌家数 | 领涨股 | 领涨股涨幅(%) | ...
+ */
+export interface ThsSectorRow {
+  /** 板块名称 */
+  name: string;
+  /** 涨跌幅 % */
+  changePercent: number;
+  /** 总成交额 (万元) */
+  totalAmount: number;
+  /** 资金净流入 (万元) */
+  capitalFlow: number;
+  /** 上涨家数 */
+  upCount: number;
+  /** 下跌家数 */
+  downCount: number;
+  /** 领涨股名称 */
+  leadingStock: string;
+  /** 领涨股涨幅 % */
+  leadingChange: number;
 }
 
 // ─── 统计 / 指标 ──────────────────────────────────────
