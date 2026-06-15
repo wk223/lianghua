@@ -1,12 +1,12 @@
 /**
- * xvqiu 主应用组件 (Web 版)
- * 直接调用 AnalysisEngine，无需 Electron IPC
+ * xvqiu 主应用组件 — 增强版
  *
  * @module sidepanel/App
  */
 
 import React, { useEffect } from 'react';
 import { useAppStore } from './stores/useAppStore';
+import { useAutoPolling } from './hooks/useAutoPolling';
 
 // 子组件
 import StockInput from './components/StockInput';
@@ -18,6 +18,7 @@ import LoadingState from './components/LoadingState';
 import ErrorState from './components/ErrorState';
 import SettingsPanel from './components/SettingsPanel';
 import Watchlist from './components/Watchlist';
+import HistoryPanel from './components/HistoryPanel';
 
 const App: React.FC = () => {
   const {
@@ -25,23 +26,30 @@ const App: React.FC = () => {
     status,
     envLevel,
     stockResults,
+    todayAction,
+    autoPolling,
+    lastPollTime,
     hasApiKey,
   } = useAppStore();
 
-  // Web 版无 IPC 连接检测，直接标记为已连接
+  const { startPolling, stopPolling, togglePolling, isPolling } = useAutoPolling();
+
+  // 组件挂载后启动自动轮询
   useEffect(() => {
     console.log('[xvqiu] Web 版已启动');
-  }, []);
+    startPolling();
+    return () => {
+      stopPolling();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── 判断展示区域内容 ──────────────────
 
   const renderContent = () => {
-    // 加载中 → 加载状态
     if (status === 'loading') {
       return <LoadingState />;
     }
 
-    // 有分析结果 → 展示结果（含环境标签 + 股票列表）
     if (status === 'success' && stockResults.length > 0) {
       return (
         <div className="space-y-4">
@@ -51,7 +59,6 @@ const App: React.FC = () => {
       );
     }
 
-    // 环境检查成功但无个股结果
     if (status === 'success' && envLevel && stockResults.length === 0) {
       return (
         <div className="space-y-4">
@@ -59,14 +66,20 @@ const App: React.FC = () => {
           <div className="flex-1 flex items-center justify-center text-gray-600 text-sm">
             <div className="text-center space-y-2">
               <div className="text-3xl">✅</div>
-              <p>环境诊断完成，可输入股票开始分析</p>
+              {todayAction ? (
+                <div className="space-y-1">
+                  <p className="text-gray-400 font-medium">环境诊断完成</p>
+                  <p className="text-xs text-gray-600">{todayAction}</p>
+                </div>
+              ) : (
+                <p>环境诊断完成，可输入股票开始分析</p>
+              )}
             </div>
           </div>
         </div>
       );
     }
 
-    // 错误状态
     if (status === 'error') {
       return (
         <div className="space-y-4">
@@ -75,15 +88,19 @@ const App: React.FC = () => {
       );
     }
 
-    // 默认 → 空状态引导
     return <EmptyState />;
+  };
+
+  const formatPollTime = (ts: number | null) => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
   };
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-gray-100">
       {/* ═══ 头部 ═══ */}
       <header className="flex items-center gap-2 px-4 py-3 border-b border-gray-800 flex-shrink-0">
-        {/* Logo + 标题 */}
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent flex-shrink-0">
             🎯 xvqiu
@@ -93,17 +110,39 @@ const App: React.FC = () => {
           </span>
         </div>
 
-        {/* 右侧状态 */}
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2">
+          {/* 自动轮询切换 */}
+          <button
+            type="button"
+            onClick={togglePolling}
+            className={`flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors ${
+              isPolling
+                ? 'text-green-400 bg-green-900/20 hover:bg-green-900/40'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'
+            }`}
+            title={isPolling ? '自动刷新已开启' : '开启自动刷新（每30秒）'}
+          >
+            <span className={`w-2 h-2 rounded-full ${isPolling ? 'bg-green-500 animate-pulse' : 'bg-gray-600'}`} />
+            <span className="hidden sm:inline">
+              {isPolling ? '刷新中' : '自动刷新'}
+            </span>
+            {lastPollTime && isPolling && (
+              <span className="text-[10px] text-gray-600 hidden sm:inline">
+                {formatPollTime(lastPollTime)}
+              </span>
+            )}
+          </button>
+
+          {/* 历史记录 */}
+          <HistoryPanel />
+
           {/* 设置 */}
           <SettingsPanel />
 
-          {/* 连接状态灯 — Web 版始终显示绿色 */}
+          {/* 连接状态 */}
           <div className="flex items-center gap-1.5">
             <span
-              className={`w-2 h-2 rounded-full ${
-                connected ? 'bg-green-500' : 'bg-red-500'
-              }`}
+              className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`}
               title={connected ? '已连接' : '断开'}
             />
             <span className="text-[10px] text-gray-600 hidden sm:inline">
@@ -113,28 +152,22 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* ═══ 主体区域（可滚动）═══ */}
+      {/* ═══ 主体 ═══ */}
       <main className="flex-1 overflow-y-auto p-4 space-y-4">
-        {/* 输入区域 */}
         <StockInput />
-
-        {/* 快捷操作按钮 */}
         <QuickActions />
-
-        {/* 自选股管理 */}
         <Watchlist />
 
-        {/* 错误提示 */}
         {status === 'error' && <ErrorState />}
-
-        {/* 结果内容区 */}
         {renderContent()}
       </main>
 
-      {/* ═══ 底部状态栏 ═══ */}
+      {/* ═══ 底部 ═══ */}
       <footer className="flex items-center justify-between px-4 py-2 text-xs text-gray-600 border-t border-gray-800 flex-shrink-0">
         <span>v1.0.0</span>
-        <span>数据: 东方财富 · 引擎: DeepSeek</span>
+        <span className="text-[10px] text-gray-700">
+          {isPolling ? '🔄 数据每30秒自动刷新' : '⏸ 自动刷新已暂停'}
+        </span>
         <span
           className={`px-1.5 py-0.5 rounded text-[10px] ${
             hasApiKey

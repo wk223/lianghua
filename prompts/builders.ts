@@ -1,11 +1,8 @@
 /**
- * Prompt 构建器
- * 构建完整的 System Prompt + User Prompt 用于各层分析
+ * Prompt 构建器 — 增强版
  *
- * 职责:
- *   1. 接收结构化数据 → 合成自然语言上下文 text
- *   2. 根据分析场景选择对应的 System Prompt 模板
- *   3. 组装最终 LLM 请求的 messages 数组
+ * 对齐 xvqiu-requirements.md 全部字段
+ * 支持增强的数据格式化 + 完整分析/环境诊断/单票/比较模式
  *
  * @module prompts/builders
  */
@@ -24,15 +21,11 @@ import type {
 } from '../utils/types';
 
 // ═══════════════════════════════════════════════════════════════
-// 上下文构建器 — 将结构化数据 → 自然语言描述
+// 上下文构建器
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * 将大盘指数数据转为自然语言上下文
- */
 export function formatMarketIndex(indices: MarketIndex[]): string {
   if (indices.length === 0) return '暂无大盘指数数据';
-
   return indices
     .map((idx) => {
       const direction = idx.changePercent >= 0 ? '📈' : '📉';
@@ -41,42 +34,28 @@ export function formatMarketIndex(indices: MarketIndex[]): string {
     .join('\n');
 }
 
-/**
- * 将板块数据转为自然语言上下文
- */
 export function formatSectors(sectors: SectorData[]): string {
   if (sectors.length === 0) return '暂无板块数据';
-
-  const top5 = sectors.slice(0, 5);
-  const lines = top5.map((s, i) => {
+  const top8 = sectors.slice(0, 8);
+  const lines = top8.map((s, i) => {
     const dir = s.changePercent >= 0 ? '📈' : '📉';
     return `  ${i + 1}. ${s.name}(${s.code}) ${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}% | 领涨:${s.leadingStock}(${s.leadingChange >= 0 ? '+' : ''}${s.leadingChange.toFixed(2)}%) | 涨${s.upCount}/跌${s.downCount} | 资金流:${formatFundFlow(s.capitalFlow)}`;
   });
-
-  return `【板块表现 Top ${top5.length}】\n${lines.join('\n')}`;
+  return `【板块表现 Top ${top8.length}】\n${lines.join('\n')}`;
 }
 
-/**
- * 将热门题材转为自然语言上下文
- */
 export function formatHotTopics(topics: HotTopic[]): string {
   if (topics.length === 0) return '暂无题材数据';
-
-  const top5 = topics.slice(0, 5);
-  const lines = top5.map((t, i) => {
+  const top8 = topics.slice(0, 8);
+  const lines = top8.map((t, i) => {
     const dir = t.changePercent >= 0 ? '📈' : '📉';
     return `  ${i + 1}. ${t.name}(${t.code}) ${t.changePercent >= 0 ? '+' : ''}${t.changePercent.toFixed(2)}% | 领涨:${t.leadingStock} | 涨${t.upCount}/跌${t.downCount}`;
   });
-
-  return `【热门题材 Top ${top5.length}】\n${lines.join('\n')}`;
+  return `【热门题材 Top ${top8.length}】\n${lines.join('\n')}`;
 }
 
-/**
- * 将个股行情数据转为自然语言上下文
- */
 export function formatStockQuotes(quotes: StockQuote[]): string {
   if (quotes.length === 0) return '暂无个股数据';
-
   return quotes
     .map((q) => {
       const dir = q.changePercent >= 0 ? '📈' : '📉';
@@ -85,18 +64,12 @@ export function formatStockQuotes(quotes: StockQuote[]): string {
     .join('\n');
 }
 
-/**
- * 将板块明细转为自然语言上下文
- */
 export function formatSectorDetail(detail: SectorDetail): string {
   const { sector, stocks } = detail;
   const topStocks = stocks.slice(0, 5);
-
   const stockLines = topStocks.map(
-    (s, i) =>
-      `  ${i + 1}. ${s.name}(${s.code}): ¥${s.price} ${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%`,
+    (s, i) => `  ${i + 1}. ${s.name}(${s.code}): ¥${s.price} ${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%`,
   );
-
   return [
     `板块: ${sector.name}(${sector.code}) | 涨幅:${sector.changePercent >= 0 ? '+' : ''}${sector.changePercent.toFixed(2)}% | 涨${sector.upCount}/跌${sector.downCount} | 资金流:${formatFundFlow(sector.capitalFlow)}`,
     `领涨: ${sector.leadingStock}(${sector.leadingStockCode}) ${sector.leadingChange >= 0 ? '+' : ''}${sector.leadingChange.toFixed(2)}%`,
@@ -112,9 +85,6 @@ export function formatSectorDetail(detail: SectorDetail): string {
 export class PromptBuilder {
   /**
    * 组装完整分析 Prompt（四层全量分析）
-   *
-   * @param data - 当前市场数据
-   * @returns messages 数组，可直接传给 DeepSeekClient.chat()
    */
   buildAnalysisPrompt(data: {
     indices?: MarketIndex[];
@@ -122,29 +92,26 @@ export class PromptBuilder {
     topics?: HotTopic[];
     quotes?: StockQuote[];
     stocksToAnalyze?: { name: string; code: string }[];
+    /** 二选一/三选一比较模式的输入 */
+    compareMode?: boolean;
   }): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
-    // ── 构建动态上下文 ──
     const contextParts: string[] = [];
 
     if (data.indices && data.indices.length > 0) {
       contextParts.push(formatMarketIndex(data.indices));
     }
-
     if (data.sectors && data.sectors.length > 0) {
       contextParts.push(formatSectors(data.sectors));
     }
-
     if (data.topics && data.topics.length > 0) {
       contextParts.push(formatHotTopics(data.topics));
     }
-
     if (data.quotes && data.quotes.length > 0) {
       contextParts.push(`【个股行情】\n${formatStockQuotes(data.quotes)}`);
     }
 
     const dynamicContext = contextParts.join('\n\n');
 
-    // ── 构建股票列表 ──
     const stockListStr = data.stocksToAnalyze
       ? data.stocksToAnalyze.map((s) => `${s.name}(${s.code})`).join('、')
       : '';
@@ -153,16 +120,15 @@ export class PromptBuilder {
       ? `请分析以下股票：${stockListStr}`
       : undefined;
 
-    // ── 构建 System Prompt ──
     const systemPrompt = buildFullSystemPrompt({
       dynamicContext: dynamicContext || undefined,
       selectedStocks,
     });
 
-    // ── 构建 User Prompt ──
     const userPrompt = this.buildUserAnalysisPrompt(
       data.stocksToAnalyze ?? [],
       data.indices?.length ? '已有市场数据' : '无市场数据',
+      data.compareMode ?? false,
     );
 
     return [
@@ -172,7 +138,7 @@ export class PromptBuilder {
   }
 
   /**
-   * 构建环境诊断 Prompt（仅 L1 层面）
+   * 构建环境诊断 Prompt（增强版 — 含今天能不能做）
    */
   buildEnvCheckPrompt(data: {
     indices?: MarketIndex[];
@@ -184,11 +150,9 @@ export class PromptBuilder {
     if (data.indices && data.indices.length > 0) {
       contextParts.push(formatMarketIndex(data.indices));
     }
-
     if (data.sectors && data.sectors.length > 0) {
       contextParts.push(formatSectors(data.sectors));
     }
-
     if (data.topics && data.topics.length > 0) {
       contextParts.push(formatHotTopics(data.topics));
     }
@@ -202,14 +166,13 @@ export class PromptBuilder {
       { role: 'system', content: systemPrompt },
       {
         role: 'user',
-        content:
-          '请基于以上市场数据分析当前市场环境，输出环境评级、情绪描述和仓位建议。',
+        content: '请基于以上市场数据做环境诊断。必须回答：今天整体值不值得做？适合进攻还是防守？仓位建议？哪些方向有确定性？什么类型最好别碰？',
       },
     ];
   }
 
   /**
-   * 构建单票快速分析 Prompt
+   * 构建单票 Prompt（8项必答）
    */
   buildSingleStockPrompt(data: {
     quote: StockQuote;
@@ -221,82 +184,112 @@ export class PromptBuilder {
     if (data.indices && data.indices.length > 0) {
       contextParts.push(formatMarketIndex(data.indices));
     }
-
     if (data.sectors && data.sectors.length > 0) {
       contextParts.push(formatSectors(data.sectors));
     }
-
-    contextParts.push(
-      `【目标个股】\n${formatStockQuotes([data.quote])}`,
-    );
+    contextParts.push(`【目标个股】\n${formatStockQuotes([data.quote])}`);
 
     const dynamicContext = contextParts.join('\n\n');
-    const systemPrompt = buildSingleStockPrompt({
+    const systemPrompt = buildSingleStockPrompt({ dynamicContext });
+
+    return [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: `请按8项必答要求详细分析 ${data.quote.name}(${data.quote.code})，输出完整分析。`,
+      },
+    ];
+  }
+
+  /**
+   * 构建比较模式 Prompt（二选一/三选一）
+   */
+  buildComparePrompt(data: {
+    quotes: StockQuote[];
+    indices?: MarketIndex[];
+    sectors?: SectorData[];
+    topics?: HotTopic[];
+  }): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+    const contextParts: string[] = [];
+
+    if (data.indices && data.indices.length > 0) {
+      contextParts.push(formatMarketIndex(data.indices));
+    }
+    if (data.sectors && data.sectors.length > 0) {
+      contextParts.push(formatSectors(data.sectors));
+    }
+    if (data.topics && data.topics.length > 0) {
+      contextParts.push(formatHotTopics(data.topics));
+    }
+    contextParts.push(`【待比较个股】\n${formatStockQuotes(data.quotes)}`);
+
+    const dynamicContext = contextParts.join('\n\n');
+
+    const stocksList = data.quotes.map((q) => `${q.name}(${q.code})`).join('、');
+
+    const systemPrompt = buildFullSystemPrompt({
       dynamicContext,
+      selectedStocks: `请比较以下 ${data.quotes.length} 只股票：${stocksList}`,
     });
 
     return [
       { role: 'system', content: systemPrompt },
       {
         role: 'user',
-        content: `请详细分析 ${data.quote.name}(${data.quote.code})，输出完整的五维评估和交易结论。`,
+        content: `请对以下 ${data.quotes.length} 只股票进行强制比较并排序：${stocksList}。要求：
+1. 必须分出胜负，决出最优先的那只
+2. 每个股票按 Section 5 结构逐只分析
+3. 输出 compareResult 说明谁更优先、为什么更优先、另一个为什么不如它
+4. 哪个更符合我的短线模式
+5. 哪个当前买点更合理`,
       },
     ];
   }
 
-  /**
-   * 内部：构建 User Prompt（分析指令部分）
-   */
+  // ─── 内部方法 ──────────────────────────────────────
+
   private buildUserAnalysisPrompt(
     stocksToAnalyze: { name: string; code: string }[],
     marketDataStatus: string,
+    compareMode: boolean,
   ): string {
-    const stockLines = stocksToAnalyze.map(
-      (s, i) => `  ${i + 1}. ${s.name}(${s.code})`,
-    );
-
     if (stocksToAnalyze.length === 0) {
       return '请分析当前市场环境，并给出交易建议。';
     }
 
+    const stockLines = stocksToAnalyze.map(
+      (s, i) => `  ${i + 1}. ${s.name}(${s.code})`,
+    );
+
+    const modeInstruction = compareMode
+      ? '这是比较模式，请对全部股票做排序并输出 compareResult。'
+      : '';
+
     return [
-      `请严格按照四层分析框架，分析以下股票池中的 ${stocksToAnalyze.length} 只股票：`,
+      `请严格按照交易逻辑框架，分析以下股票池中的 ${stocksToAnalyze.length} 只股票：`,
       '',
       stockLines.join('\n'),
       '',
       `市场数据状态: ${marketDataStatus}`,
       '',
       '要求:',
-      '- 先分析市场环境 (L1)',
-      '- 再判断主线方向 (L2)',
-      '- 再逐只个股五维评估 (L3)',
-      '- 最后输出四类结论并排序 (L4)',
-    ].join('\n');
-  }
-
-  // ─── 工具方法 ──────────────────────────────────────
-
-  /**
-   * 组合多段 context 文本
-   */
-  static joinContext(...parts: (string | undefined | null)[]): string {
-    return parts.filter(Boolean).join('\n\n');
+      '- 先分析市场环境 (L1) — 必须含 todayAction/avoidType/certainDirections',
+      '- 再判断主线方向 (L2) — 必须含 logicStrength/suitablePlay',
+      '- 再逐只个股分析 (L3) — 必须按Section 5完整9项',
+      '- 最后输出结论并排序',
+      modeInstruction,
+    ].filter(Boolean).join('\n');
   }
 
   /**
    * 从用户输入文本中提取股票代码
-   * 支持格式: "600519"、"贵州茅台"、"600519贵州茅台"、"600519,000858"
    */
   static extractStocks(input: string): string[] {
-    // 匹配 6 位数字代码
     const codePattern = /\b\d{6}\b/g;
     const codes = input.match(codePattern);
-
     if (codes) {
       return [...new Set(codes)];
     }
-
-    // 如果没有数字代码，返回空（调用方可以按名称搜索）
     return [];
   }
 }
@@ -305,9 +298,6 @@ export class PromptBuilder {
 // 工具函数
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * 格式化金额（元 → 亿/万）
- */
 function formatAmount(yuan: number): string {
   if (yuan >= 1_0000_0000) {
     return `${(yuan / 1_0000_0000).toFixed(1)}亿`;
@@ -318,9 +308,6 @@ function formatAmount(yuan: number): string {
   return `${yuan.toFixed(0)}元`;
 }
 
-/**
- * 格式化资金流向
- */
 function formatFundFlow(wanYuan: number): string {
   const abs = Math.abs(wanYuan);
   const prefix = wanYuan >= 0 ? '+' : '-';

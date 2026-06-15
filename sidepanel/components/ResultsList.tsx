@@ -1,8 +1,9 @@
 /**
- * ResultsList — 分析结果列表
+ * ResultsList — 分析结果列表（增强版）
  *
  * 按优先级排序展示所有股票的结论卡片
- * 顶部显示统计摘要（各结论类型数量）
+ * 顶部显示统计摘要 + 排除规则摘要
+ * 关联 stockDetails 以展示增强字段
  *
  * @module sidepanel/components/ResultsList
  */
@@ -10,16 +11,28 @@
 import React, { useMemo } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import ResultCard from './ResultCard';
+import CompareResultCard from './CompareResultCard';
 import type { Verdict } from '../../utils/types';
 
 const ResultsList: React.FC = () => {
-  const { stockResults } = useAppStore();
+  const { stockResults, stockDetails, compareResult } = useAppStore();
 
-  // 按优先级排序（priority 越低越靠前）
+  // 按优先级排序
   const sorted = useMemo(
     () => [...stockResults].sort((a, b) => a.priority - b.priority),
     [stockResults],
   );
+
+  // 构建 code → detail 的映射
+  const detailMap = useMemo(() => {
+    const map = new Map<string, typeof stockDetails[0]>();
+    for (const d of stockDetails) {
+      if (d.code && !map.has(d.code)) {
+        map.set(d.code, d);
+      }
+    }
+    return map;
+  }, [stockDetails]);
 
   // 统计各结论数量
   const stats = useMemo(() => {
@@ -39,6 +52,9 @@ const ResultsList: React.FC = () => {
 
   return (
     <section className="space-y-3">
+      {/* 比较模式结果（如果存在） */}
+      {compareResult && <CompareResultCard />}
+
       {/* 统计摘要条 */}
       <div className="flex flex-wrap gap-2 text-xs">
         {stats.BUY > 0 && (
@@ -66,7 +82,12 @@ const ResultsList: React.FC = () => {
       {/* 结论列表 */}
       <div className="space-y-2">
         {sorted.map((result, index) => (
-          <ResultCard key={result.code} result={result} index={index} />
+          <ResultCard
+            key={result.code}
+            result={result}
+            detail={detailMap.get(result.code)}
+            index={index}
+          />
         ))}
       </div>
     </section>

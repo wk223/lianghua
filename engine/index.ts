@@ -20,6 +20,7 @@ export { L1MarketAnalyzer } from './l1-market';
 export { L2DirectionAnalyzer } from './l2-direction';
 export { L3StockAnalyzer } from './l3-stock';
 export { L4ConclusionEngine, L4ParseError } from './l4-conclusion';
+export { ExclusionFilter, exclusionFilter } from './exclusion-filter';
 
 import { L1MarketAnalyzer } from './l1-market';
 import { L2DirectionAnalyzer } from './l2-direction';
@@ -236,9 +237,9 @@ export class AnalysisEngine {
   }
 
   /**
-   * 环境诊断（仅 L1）
+   * 环境诊断（增强版）
    *
-   * 快速获取市场环境评级，不分析个股
+   * 获取市场环境评级 + 方向判断 + LLM 增强分析（含今天能不能做）
    */
   async envCheck(options?: EnvCheckOptions): Promise<MarketEnvResult & {
     indices: MarketIndex[];
@@ -246,16 +247,61 @@ export class AnalysisEngine {
     topics: HotTopic[];
     sentiment: SentimentData | null;
   }> {
-    logger.info('[Engine] 环境诊断');
+    logger.info('[Engine] 环境诊断（增强版）');
 
     const marketData = await this.fetchMarketData(options?.forceRefresh);
     options?.signal?.throwIfAborted();
 
+    // L1 基础分析
     const envResult = await this.runL1(
       marketData.indices,
       marketData.sectors,
       marketData.sentiment,
     );
+
+    // L2 方向分析
+    const directions = await this.runL2(marketData.sectors, marketData.topics);
+
+    try {
+      // 调用 LLM 获取增强的环境诊断（todayAction, avoidType, certainDirections）
+      const messages = this.promptBuilder.buildEnvCheckPrompt({
+        indices: marketData.indices,
+        sectors: marketData.sectors,
+        topics: marketData.topics,
+      });
+
+      const llmResponse = await this.llmClient.chat(messages, {
+        signal: options?.signal,
+      });
+      const llmOutput = llmResponse.choices?.[0]?.message?.content ?? '';
+
+      // 解析 LLM 输出中的增强字段
+      if (llmOutput) {
+        const enhancedResult = this.conclusionEngine.process(llmOutput, {
+          envLevel: envResult.envLevel,
+        });
+
+        // 合并增强字段
+        if (enhancedResult.marketEnv.todayAction) {
+          (envResult as any).todayAction = enhancedResult.marketEnv.todayAction;
+        }
+        if (enhancedResult.marketEnv.avoidType) {
+          (envResult as any).avoidType = enhancedResult.marketEnv.avoidType;
+        }
+        if (enhancedResult.marketEnv.certainDirections) {
+          (envResult as any).certainDirections = enhancedResult.marketEnv.certainDirections;
+        }
+        if (enhancedResult.marketEnv.sentiment) {
+          (envResult as any).sentiment = enhancedResult.marketEnv.sentiment;
+        }
+        if (enhancedResult.marketEnv.suggestion) {
+          (envResult as any).suggestion = enhancedResult.marketEnv.suggestion;
+        }
+      }
+    } catch (err) {
+      // LLM 失败不影响基础环境诊断
+      logger.warn('[Engine] LLM 增强诊断失败，使用本地分析结果:', (err as Error).message);
+    }
 
     return {
       ...envResult,
