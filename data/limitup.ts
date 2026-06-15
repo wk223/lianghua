@@ -140,21 +140,10 @@ export class LimitUpAdapter {
       source = '同花顺涨停板';
       logger.info('[LimitUp] 同花顺数据获取成功:', stocks.length, '只');
     } catch (err) {
-      logger.warn('[LimitUp] 同花顺数据获取失败，尝试东方财富:', (err as Error).message);
+      logger.warn('[LimitUp] 同花顺数据获取失败，使用兜底方案:', (err as Error).message);
     }
 
-    // ═══ 策略 2: 东方财富 API ═══
-    if (stocks.length === 0) {
-      try {
-        stocks = await this.fetchFromEastMoney(opts);
-        source = '东方财富';
-        logger.info('[LimitUp] 东方财富数据获取成功:', stocks.length, '只');
-      } catch (err) {
-        logger.warn('[LimitUp] 东方财富获取失败，使用兜底方案:', (err as Error).message);
-      }
-    }
-
-    // ═══ 策略 3: 兜底方案 ═══
+    // ═══ 策略 2: 兜底方案 ═══
     if (stocks.length === 0) {
       try {
         stocks = await this.fetchFallback(opts);
