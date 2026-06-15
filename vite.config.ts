@@ -40,6 +40,39 @@ export default defineConfig({
         },
         rewrite: (path) => path.replace(/^\/api\/cls/, ''),
       },
+      // 同花顺涨停板/龙虎榜 — HTML 数据源
+      '/api/ths_zt': {
+        target: 'https://q.10jqka.com.cn',
+        changeOrigin: true,
+        secure: false,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://q.10jqka.com.cn/',
+        },
+        rewrite: (path) => path.replace(/^\/api\/ths_zt/, ''),
+      },
+      // 东方财富 push2 数据 — 涨停/龙虎榜/资金流兜底
+      '/api/em': {
+        target: 'https://push2.eastmoney.com',
+        changeOrigin: true,
+        secure: false,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://data.eastmoney.com/',
+        },
+        rewrite: (path) => path.replace(/^\/api\/em/, ''),
+      },
+      // 东方 wealth 数据 API
+      '/api/em_datacenter': {
+        target: 'https://datacenter-web.eastmoney.com',
+        changeOrigin: true,
+        secure: false,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://data.eastmoney.com/',
+        },
+        rewrite: (path) => path.replace(/^\/api\/em_datacenter/, ''),
+      },
     },
   },
   build: {

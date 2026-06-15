@@ -4,7 +4,7 @@
  * @module sidepanel/App
  */
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAppStore } from './stores/useAppStore';
 import { useAutoPolling } from './hooks/useAutoPolling';
 
@@ -21,6 +21,13 @@ import Watchlist from './components/Watchlist';
 import HistoryPanel from './components/HistoryPanel';
 import DailyPicks from './components/DailyPicks';
 
+// 短线交易监测面板
+import LimitUpPanel from './components/LimitUpPanel';
+import DragonTigerPanel from './components/DragonTigerPanel';
+import CapitalFlow from './components/CapitalFlow';
+import AuctionAlert from './components/AuctionAlert';
+import PriceAlert from './components/PriceAlert';
+
 const App: React.FC = () => {
   const {
     connected,
@@ -34,6 +41,9 @@ const App: React.FC = () => {
     dailyPicksResult,
     dailyPicksLoading,
   } = useAppStore();
+
+  // 短线监测面板展开状态
+  const [monitoringOpen, setMonitoringOpen] = useState(false);
 
   const { startPolling, stopPolling, togglePolling, isPolling } = useAutoPolling();
 
@@ -160,6 +170,43 @@ const App: React.FC = () => {
         <StockInput />
         <QuickActions />
         <Watchlist />
+
+        {/* ═══ 短线监测面板折叠区 ═══ */}
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setMonitoringOpen((v) => !v)}
+            className="flex items-center gap-2 w-full text-left text-xs text-gray-500 hover:text-gray-400 transition-colors px-1"
+          >
+            <svg
+              className={`w-3 h-3 transition-transform duration-150 ${
+                monitoringOpen ? 'rotate-90' : ''
+              }`}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span>📊 短线监测</span>
+            <span className="text-gray-700">(涨停板·龙虎榜·资金流·竞价·预警)</span>
+          </button>
+
+          <div
+            className={`overflow-hidden transition-all duration-200 ${
+              monitoringOpen ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0'
+            }`}
+          >
+            <div className="space-y-3 pl-3 border-l-2 border-gray-800">
+              <LimitUpPanel />
+              <DragonTigerPanel />
+              <CapitalFlow />
+              <AuctionAlert />
+              <PriceAlert />
+            </div>
+          </div>
+        </div>
 
         {(dailyPicksResult || dailyPicksLoading) && <DailyPicks />}
 

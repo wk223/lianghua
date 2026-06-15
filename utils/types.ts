@@ -418,3 +418,56 @@ export type SentimentLabel =
   | '偏空'
   | '悲观'
   | '极度悲观';
+
+// ─── 短线交易模块类型 ────────────────────────────────
+
+/** 资金流向个股数据 */
+export interface StockFlow {
+  code: string;
+  name: string;
+  price: number;
+  changePercent: number;
+  /** 净流入 (万元) */
+  netInflow: number;
+  /** 所属板块 */
+  sector: string;
+}
+
+/** 竞价异动信号 */
+export interface AuctionAlertItem {
+  code: string;
+  name: string;
+  /** 竞价类型 */
+  type: '高开' | '竞价量异常' | '大单试盘' | '跌停开' | '其他';
+  /** 信号描述 */
+  description: string;
+  /** 预警等级 */
+  alertLevel: 'warning' | 'important' | 'critical';
+  /** 竞价涨幅 % */
+  auctionChange: number;
+  /** 竞价量 (手) */
+  auctionVolume: number;
+  /** 时间 */
+  time: string;
+}
+
+/** 价格预警设置 */
+export interface PriceAlertConfig {
+  id: string;
+  /** 股票代码 */
+  code: string;
+  /** 股票名称 */
+  name: string;
+  /** 目标价 */
+  targetPrice: number;
+  /** 预警方向: above=向上突破, below=向下跌破 */
+  direction: 'above' | 'below';
+  /** 是否启用 */
+  enabled: boolean;
+  /** 创建时间 */
+  createdAt: number;
+  /** 最后触发时间 */
+  lastTriggeredAt?: number;
+  /** 备注 */
+  note?: string;
+}

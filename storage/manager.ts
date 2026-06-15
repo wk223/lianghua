@@ -37,6 +37,8 @@ export interface StorageSchema {
   history: AnalysisRecord[];
   meta: Record<string, unknown>;
   cache: Record<string, { data: unknown; timestamp: number; ttl: number }>;
+  /** 价格预警配置列表 */
+  priceAlerts: import('../utils/types').PriceAlertConfig[];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -62,6 +64,7 @@ const DEFAULT_DATA: StorageSchema = {
     version: '1.0.0',
   },
   cache: {},
+  priceAlerts: [],
 };
 
 const STORAGE_KEY = 'xvqiu_data';
@@ -166,6 +169,74 @@ export class StorageManager {
   clearCache(): void {
     this.data.cache = {};
     this.scheduleSave();
+  }
+
+  // ─── 价格预警 ──────────────────────────────────
+
+  /**
+   * 获取所有价格预警配置
+   */
+  getPriceAlerts(): import('../utils/types').PriceAlertConfig[] {
+    return [...this.data.priceAlerts];
+  }
+
+  /**
+   * 新增价格预警
+   * @returns 预警 ID
+   */
+  addPriceAlert(alert: Omit<import('../utils/types').PriceAlertConfig, 'id' | 'createdAt'>): string {
+    const id = generateId();
+    const newAlert: import('../utils/types').PriceAlertConfig = {
+      ...alert,
+      id,
+      createdAt: Date.now(),
+    };
+    this.data.priceAlerts.push(newAlert);
+    this.scheduleSave();
+    return id;
+  }
+
+  /**
+   * 更新价格预警
+   */
+  updatePriceAlert(id: string, updates: Partial<import('../utils/types').PriceAlertConfig>): boolean {
+    const idx = this.data.priceAlerts.findIndex((a) => a.id === id);
+    if (idx === -1) return false;
+    this.data.priceAlerts[idx] = { ...this.data.priceAlerts[idx], ...updates };
+    this.scheduleSave();
+    return true;
+  }
+
+  /**
+   * 删除价格预警
+   */
+  removePriceAlert(id: string): boolean {
+    const idx = this.data.priceAlerts.findIndex((a) => a.id === id);
+    if (idx === -1) return false;
+    this.data.priceAlerts.splice(idx, 1);
+    this.scheduleSave();
+    return true;
+  }
+
+  /**
+   * 启用/禁用价格预警
+   */
+  togglePriceAlert(id: string, enabled: boolean): boolean {
+    return this.updatePriceAlert(id, { enabled });
+  }
+
+  /**
+   * 更新预警触发时间
+   */
+  markPriceAlertTriggered(id: string): boolean {
+    return this.updatePriceAlert(id, { lastTriggeredAt: Date.now() });
+  }
+
+  /**
+   * 获取所有启用的预警（用于轮询检查）
+   */
+  getEnabledPriceAlerts(): import('../utils/types').PriceAlertConfig[] {
+    return this.data.priceAlerts.filter((a) => a.enabled);
   }
 
   // ─── 历史记录 ──────────────────────────────────
