@@ -1,13 +1,13 @@
 /**
- * QuickActions — 快捷操作按钮 (Electron 版)
- * 使用 IPC invoke 替换 chrome.runtime.sendMessage
+ * QuickActions — 快捷操作按钮 (Web 版)
+ * 直接调用 AnalysisEngine，无需 IPC
  *
  * @module sidepanel/components/QuickActions
  */
 
 import React, { useCallback } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { sendMessage } from '../../src/shared/ipc-bridge';
+import { analysisEngine, L2DirectionAnalyzer } from '../../engine';
 
 const QuickActions: React.FC = () => {
   const {
@@ -32,24 +32,24 @@ const QuickActions: React.FC = () => {
     setError(null);
 
     try {
-      const response = await sendMessage({ type: 'ENV_CHECK' });
+      const envData = await analysisEngine.envCheck();
 
-      if (response?.success && response.data) {
-        const data = response.data as any;
-        setEnvResult(
-          data.envLevel,
-          data.sentiment,
-          data.suggestion,
-        );
-        if (data.directions?.length > 0) {
-          useAppStore.getState().setDirections(data.directions);
-        }
-        setStatus('success');
-      } else {
-        setError(response?.error ?? '环境检查失败');
+      setEnvResult(
+        envData.envLevel,
+        envData.sentiment,
+        envData.suggestion,
+      );
+
+      // 运行 L2 方向分析
+      const l2 = new L2DirectionAnalyzer();
+      const directions = await l2.analyze(envData.sectors, envData.topics);
+      if (directions?.length > 0) {
+        useAppStore.getState().setDirections(directions);
       }
+
+      setStatus('success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '环境检查请求失败');
+      setError(err instanceof Error ? err.message : '环境检查失败');
     } finally {
       setCurrentAction('none');
     }
@@ -75,22 +75,16 @@ const QuickActions: React.FC = () => {
         .map((l) => l.trim())
         .filter((l) => l.length > 0);
 
-      const response = await sendMessage({
-        type: 'ANALYZE_POOL',
-        payload: { stocks: lines },
+      // 提取股票代码（去除名称前缀）
+      const stocks = lines.map((l) => {
+        const parts = l.split(/\s+/);
+        return parts.find((p) => /^\d{6}$/.test(p)) ?? l;
       });
 
-      if (response?.success && response.data) {
-        if (typeof response.data === 'object' && 'marketEnv' in (response.data as any)) {
-          useAppStore.getState().setAnalysisResult(response.data as any);
-        } else {
-          setStatus('success');
-        }
-      } else {
-        setError(response?.error ?? '分析请求失败');
-      }
+      const result = await analysisEngine.analyzePool({ stocks });
+      useAppStore.getState().setAnalysisResult(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '分析请求发送失败');
+      setError(err instanceof Error ? err.message : '分析请求失败');
     } finally {
       setCurrentAction('none');
     }

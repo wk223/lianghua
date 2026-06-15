@@ -14,10 +14,7 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"],
-      "@shared/*": ["src/shared/*"]
-    }
+    "ignoreDeprecations": "6.0"
   },
   "include": [
     "sidepanel/**/*.ts",
@@ -27,8 +24,7 @@
     "data/**/*.ts",
     "storage/**/*.ts",
     "prompts/**/*.ts",
-    "utils/**/*.ts",
-    "src/**/*.ts"
+    "utils/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist", "dist-electron", ".crx", "electron"]
+  "exclude": ["node_modules", "dist", "dist-electron", "**/*.test.ts"]
 }

@@ -40,8 +40,25 @@ import { DataFetcher } from './fetcher';
 // 常量
 // ═══════════════════════════════════════════════════════════════
 
-/** 东方财富 push2 API 基础域名 */
-const API_BASE = 'https://push2.eastmoney.com/api/qt';
+/**
+ * 东方财富 push2 API 基础 URL
+ *
+ * 开发环境: 通过 Vite proxy 转发 (解决浏览器 CORS 限制)
+ * 生产环境: 直连东方财富 API（需 nginx 配置反向代理 /api/eastmoney）
+ *
+ * 注意: 生产构建后，需要 nginx 将 /api/eastmoney/* 反向代理到
+ *       https://push2.eastmoney.com，否则前端无法跨域访问。
+ */
+/**
+ * 东方财富 API 通过 Vite 代理转发（开发环境）或 nginx 反向代理（生产环境）
+ * 解决浏览器端直接请求 push2.eastmoney.com 的 CORS 限制。
+ *
+ * ⚠️ 生产部署必须配置 nginx:
+ *   location /api/eastmoney/ {
+ *     proxy_pass https://push2.eastmoney.com/;
+ *   }
+ */
+const API_BASE = '/api/eastmoney/api/qt';
 
 /** 个股行情 API 路径 */
 const STOCK_GET_PATH = '/stock/get';

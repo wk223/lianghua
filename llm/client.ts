@@ -1,6 +1,6 @@
 /**
- * DeepSeek API 客户端 (Electron 版)
- * API Key 硬编码在代码中，不再使用 chrome.storage
+ * DeepSeek API 客户端 (Web 版)
+ * API Key 硬编码在代码中，浏览器端直接使用 fetch 调用 DeepSeek API
  *
  * @module llm/client
  */
@@ -36,37 +36,37 @@ import { logger } from '../utils/logger';
 
 const HARDCODED_API_KEY = 'sk-8db314175dba415fb695b03a21cb73b5';
 
-// ─── API Key 管理器 (Electron 版) ─────────────────────
+// ─── API Key 管理器 (Web 版) ────────────────────────
+// 浏览器端直接使用硬编码 Key，也支持运行时切换
 
 export class StorageKeyManager {
   private cachedKey: string | null = null;
 
   /**
    * 获取 API Key
-   * 优先级: 1) 构造函数传入 2) 硬编码 Key 3) 环境变量 fallback
+   * 优先级: 1) 构造函数传入 2) 硬编码 Key 3) localStorage fallback
    */
   async getKey(): Promise<string> {
     if (this.cachedKey) return this.cachedKey;
 
-    // 硬编码 Key
-    if (HARDCODED_API_KEY && HARDCODED_API_KEY !== 'sk-8db314175dba415fb695b03a21cb73b5') {
+    // 硬编码 Key（始终可用）
+    if (HARDCODED_API_KEY) {
       this.cachedKey = HARDCODED_API_KEY;
       return this.cachedKey;
     }
 
-    // Electron 环境 → 环境变量
+    // localStorage 回退
     try {
-      const env = (globalThis as any)?.process?.env;
-      const envKey: string | undefined = env?.DEEPSEEK_API_KEY;
-      if (envKey && envKey.trim()) {
-        this.cachedKey = envKey.trim();
+      const stored = localStorage.getItem('xvqiu_api_key');
+      if (stored && stored.trim()) {
+        this.cachedKey = stored.trim();
         return this.cachedKey;
       }
     } catch {
-      // 非 Node 环境忽略
+      // 无痕模式等可能抛出异常
     }
 
-    throw new AuthError('API Key 未配置。请在环境变量 DEEPSEEK_API_KEY 中设置，或更新 llm/client.ts 中的 HARDCODED_API_KEY。');
+    throw new AuthError('API Key 未配置。请更新 llm/client.ts 中的 HARDCODED_API_KEY 或在 localStorage 中设置 xvqiu_api_key。');
   }
 
   /** 设置 API Key */
@@ -76,12 +76,18 @@ export class StorageKeyManager {
       throw new AuthError('API Key 不能为空');
     }
     this.cachedKey = trimmed;
+    try {
+      localStorage.setItem('xvqiu_api_key', trimmed);
+    } catch { /* ignore */ }
     logger.info('[KeyManager] API Key 已更新');
   }
 
   /** 清除 API Key */
   async clearKey(): Promise<void> {
     this.cachedKey = null;
+    try {
+      localStorage.removeItem('xvqiu_api_key');
+    } catch { /* ignore */ }
     logger.info('[KeyManager] API Key 已清除');
   }
 

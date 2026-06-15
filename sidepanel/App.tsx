@@ -1,14 +1,12 @@
 /**
- * xvqiu 主应用组件 (Electron 版)
- * 替换 chrome.runtime.sendMessage 为 IPC invoke
- * 移除 chrome.storage 依赖
+ * xvqiu 主应用组件 (Web 版)
+ * 直接调用 AnalysisEngine，无需 Electron IPC
  *
  * @module sidepanel/App
  */
 
 import React, { useEffect } from 'react';
 import { useAppStore } from './stores/useAppStore';
-import { sendMessage } from '../src/shared/ipc-bridge';
 
 // 子组件
 import StockInput from './components/StockInput';
@@ -24,24 +22,16 @@ import Watchlist from './components/Watchlist';
 const App: React.FC = () => {
   const {
     connected,
-    setConnected,
     status,
     envLevel,
     stockResults,
     hasApiKey,
   } = useAppStore();
 
-  // 启动时检测与主进程的连接
+  // Web 版无 IPC 连接检测，直接标记为已连接
   useEffect(() => {
-    sendMessage({ type: 'PING' }).then((response) => {
-      if (response?.success) {
-        setConnected(true);
-        console.log('[xvqiu] 已连接 Electron 主进程');
-      } else {
-        console.warn('[xvqiu] 连接主进程失败');
-      }
-    });
-  }, [setConnected]);
+    console.log('[xvqiu] Web 版已启动');
+  }, []);
 
   // ─── 判断展示区域内容 ──────────────────
 
@@ -108,13 +98,13 @@ const App: React.FC = () => {
           {/* 设置 */}
           <SettingsPanel />
 
-          {/* 连接状态灯 */}
+          {/* 连接状态灯 — Web 版始终显示绿色 */}
           <div className="flex items-center gap-1.5">
             <span
               className={`w-2 h-2 rounded-full ${
                 connected ? 'bg-green-500' : 'bg-red-500'
               }`}
-              title={connected ? '主进程已连接' : '主进程未连接'}
+              title={connected ? '已连接' : '断开'}
             />
             <span className="text-[10px] text-gray-600 hidden sm:inline">
               {connected ? '已连接' : '断开'}

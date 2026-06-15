@@ -1,8 +1,8 @@
 /**
- * xvqiu 全局状态管理 (Electron 版)
+ * xvqiu 全局状态管理 (Web 版)
  *
- * 移除 chrome.runtime / chrome.storage 依赖
- * 保留与 Chrome 版完全相同的接口
+ * 移除 chrome.runtime / Electron IPC 依赖
+ * 分析逻辑在浏览器端直接调用
  *
  * @module sidepanel/stores/useAppStore
  */
@@ -12,16 +12,13 @@ import type { AnalysisResult, DirectionResult, EnvLevel, Verdict } from '../../u
 
 // ─── 状态类型 ──────────────────────────────────────────
 
-/** 单只股票输入 */
 export interface StockInput {
   code: string;
   name: string;
 }
 
-/** 分析状态 */
 export type AnalysisStatus = 'idle' | 'loading' | 'success' | 'error';
 
-/** 单只股票的分析结论展示 */
 export interface StockResult {
   code: string;
   name: string;
@@ -31,30 +28,25 @@ export interface StockResult {
   priority: number;
 }
 
-/** 快捷操作按钮状态 */
 export type ActionType = 'none' | 'env-check' | 'analyze';
 
 // ─── Store 类型 ────────────────────────────────────────
 
 interface AppState {
-  // ─── 输入 ─────────────────────────────────
   singleInput: string;
   batchInput: string;
   inputMode: 'single' | 'batch';
 
-  // ─── 连接状态 ─────────────────────────────
+  // Web 版无需连接状态，始终为 true
   connected: boolean;
 
-  // ─── 分析状态 ─────────────────────────────
   status: AnalysisStatus;
   currentAction: ActionType;
   errorMessage: string | null;
 
-  // ─── 流式输出 ────────────────────────────
   streamingText: string;
   isStreaming: boolean;
 
-  // ─── 分析结果 ─────────────────────────────
   envLevel: EnvLevel | null;
   envSentiment: string;
   envSuggestion: string;
@@ -62,31 +54,24 @@ interface AppState {
   stockResults: StockResult[];
   rawResult: AnalysisResult | null;
 
-  // ─── 设置 ─────────────────────────────────
   hasApiKey: boolean;
   settingsOpen: boolean;
 
-  // ─── 操作 ─────────────────────────────────
-
-  // 输入操作
+  // 操作
   setSingleInput: (value: string) => void;
   setBatchInput: (value: string) => void;
   setInputMode: (mode: 'single' | 'batch') => void;
 
-  // 连接操作
   setConnected: (connected: boolean) => void;
 
-  // 分析操作
   setStatus: (status: AnalysisStatus) => void;
   setCurrentAction: (action: ActionType) => void;
   setError: (message: string | null) => void;
 
-  // 流式操作
   setStreamingText: (text: string) => void;
   appendStreamingText: (chunk: string) => void;
   setIsStreaming: (streaming: boolean) => void;
 
-  // 结果操作
   setEnvResult: (level: EnvLevel, sentiment: string, suggestion: string) => void;
   setDirections: (directions: DirectionResult[]) => void;
   appendDirection: (direction: DirectionResult) => void;
@@ -95,11 +80,9 @@ interface AppState {
   setRawResult: (result: AnalysisResult | null) => void;
   setAnalysisResult: (result: AnalysisResult) => void;
 
-  // 清空
   clearResults: () => void;
   reset: () => void;
 
-  // 设置操作
   setHasApiKey: (has: boolean) => void;
   toggleSettings: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -130,7 +113,7 @@ const initialStates: Pick<
   singleInput: '',
   batchInput: '',
   inputMode: 'single',
-  connected: false,
+  connected: true, // Web 版始终连接
   status: 'idle',
   currentAction: 'none',
   errorMessage: null,
@@ -142,7 +125,7 @@ const initialStates: Pick<
   directions: [],
   stockResults: [],
   rawResult: null,
-  hasApiKey: true, // Electron 版内置 API Key
+  hasApiKey: true, // API Key 内置在代码中
   settingsOpen: false,
 };
 
@@ -151,54 +134,34 @@ const initialStates: Pick<
 export const useAppStore = create<AppState>((set) => ({
   ...initialStates,
 
-  // ─── 输入操作 ─────────────────────────────
-
   setSingleInput: (value: string) => set({ singleInput: value }),
-
   setBatchInput: (value: string) => set({ batchInput: value }),
-
   setInputMode: (mode: 'single' | 'batch') => set({ inputMode: mode }),
 
-  // ─── 连接操作 ─────────────────────────────
-
-  setConnected: (connected: boolean) => set({ connected }),
-
-  // ─── 分析操作 ─────────────────────────────
+  setConnected: (_connected: boolean) => {
+    // Web 版始终连接，不做实际设置
+  },
 
   setStatus: (status: AnalysisStatus) => set({ status }),
-
   setCurrentAction: (action: ActionType) => set({ currentAction: action }),
-
   setError: (message: string | null) =>
     set({ errorMessage: message, status: message ? 'error' : 'idle' }),
 
-  // ─── 流式操作 ─────────────────────────────
-
   setStreamingText: (text: string) => set({ streamingText: text }),
-
   appendStreamingText: (chunk: string) =>
     set((state) => ({ streamingText: state.streamingText + chunk })),
-
   setIsStreaming: (streaming: boolean) => set({ isStreaming: streaming }),
-
-  // ─── 结果操作 ─────────────────────────────
 
   setEnvResult: (level: EnvLevel, sentiment: string, suggestion: string) =>
     set({ envLevel: level, envSentiment: sentiment, envSuggestion: suggestion }),
 
   setDirections: (directions: DirectionResult[]) => set({ directions }),
-
   appendDirection: (direction: DirectionResult) =>
-    set((state) => ({
-      directions: [...state.directions, direction],
-    })),
+    set((state) => ({ directions: [...state.directions, direction] })),
 
   setStockResults: (results: StockResult[]) => set({ stockResults: results }),
-
   appendStockResult: (result: StockResult) =>
-    set((state) => ({
-      stockResults: [...state.stockResults, result],
-    })),
+    set((state) => ({ stockResults: [...state.stockResults, result] })),
 
   setRawResult: (result: AnalysisResult | null) => set({ rawResult: result }),
 
@@ -221,8 +184,6 @@ export const useAppStore = create<AppState>((set) => ({
       errorMessage: null,
     }),
 
-  // ─── 清空 ─────────────────────────────────
-
   clearResults: () =>
     set({
       status: 'idle',
@@ -240,18 +201,13 @@ export const useAppStore = create<AppState>((set) => ({
 
   reset: () => set({ ...initialStates }),
 
-  // ─── 设置操作 ─────────────────────────────
-
   setHasApiKey: (has: boolean) => set({ hasApiKey: has }),
-
   toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
-
   setSettingsOpen: (open: boolean) => set({ settingsOpen: open }),
 }));
 
 // ─── 快捷访问 ──────────────────────────────────────────
 
-/** 获取 verdict 对应的颜色类名 (Tailwind) */
 export const verdictToColor = (verdict: Verdict): string => {
   switch (verdict) {
     case 'BUY':
@@ -265,7 +221,6 @@ export const verdictToColor = (verdict: Verdict): string => {
   }
 };
 
-/** 获取 verdict 对应的标签文字 */
 export const verdictToLabel = (verdict: Verdict): string => {
   switch (verdict) {
     case 'BUY':
@@ -279,7 +234,6 @@ export const verdictToLabel = (verdict: Verdict): string => {
   }
 };
 
-/** 获取 verdict 对应的图标 */
 export const verdictToIcon = (verdict: Verdict): string => {
   switch (verdict) {
     case 'BUY':
@@ -293,7 +247,6 @@ export const verdictToIcon = (verdict: Verdict): string => {
   }
 };
 
-/** 获取 env level 对应的颜色类名 */
 export const envLevelToColor = (level: EnvLevel): string => {
   switch (level) {
     case 'S':

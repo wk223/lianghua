@@ -322,7 +322,7 @@ export class CacheManager {
   async clear(): Promise<void> {
     this.tier1.clear();
     this.stats.evictions += this.tier1.size;
-    await this.storage.clearAllCache().catch(() => {});
+    this.storage.clearCache();
     logger.info('[CacheManager] 缓存已全部清除');
   }
 

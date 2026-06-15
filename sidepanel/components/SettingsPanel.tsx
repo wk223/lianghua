@@ -1,8 +1,8 @@
 /**
- * SettingsPanel — 设置面板 (Electron 版)
+ * SettingsPanel — 设置面板 (Web 版)
  *
  * API Key 已内置在代码中，无需用户配置。
- * 此面板仅保留展示信息。
+ * 分析逻辑在浏览器端直接执行。
  *
  * @module sidepanel/components/SettingsPanel
  */
@@ -71,7 +71,7 @@ const SettingsPanel: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">平台</span>
-                  <span className="text-gray-300">Electron 桌面应用</span>
+                  <span className="text-gray-300">Web 应用 (Vite + React)</span>
                 </div>
               </div>
 

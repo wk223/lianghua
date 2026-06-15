@@ -1,13 +1,13 @@
 /**
- * Watchlist — 自选股管理组件 (Electron 版)
- * 使用 Electron IPC store 替换 chrome.storage.local
+ * Watchlist — 自选股管理组件 (Web 版)
+ * 使用 localStorage 持久化
  *
  * @module sidepanel/components/Watchlist
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { sendMessage } from '../../src/shared/ipc-bridge';
+import { analysisEngine } from '../../engine';
 
 // ═══════════════════════════════════════════════════════════════
 // 自选股条目接口
@@ -20,20 +20,26 @@ export interface WatchlistItem {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Storage 工具函数 (Electron IPC)
+// Storage 工具函数 (localStorage)
 // ═══════════════════════════════════════════════════════════════
 
-async function loadWatchlist(): Promise<WatchlistItem[]> {
+const WATCHLIST_KEY = 'xvqiu_watchlist';
+
+function loadWatchlist(): WatchlistItem[] {
   try {
-    const list = await window.electronAPI.store.getWatchlist();
-    return list ?? [];
+    const raw = localStorage.getItem(WATCHLIST_KEY);
+    return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 }
 
-async function saveWatchlist(list: WatchlistItem[]): Promise<void> {
-  await window.electronAPI.store.setWatchlist(list);
+function saveWatchlist(list: WatchlistItem[]): void {
+  try {
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list));
+  } catch {
+    // 存储失败静默处理
+  }
 }
 
 /** 解析用户输入的股票代码/名称 */
@@ -64,12 +70,11 @@ const Watchlist: React.FC = () => {
   const [list, setList] = useState<WatchlistItem[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [addInput, setAddInput] = useState('');
-  const [loading, setLoading] = useState(false);
 
   // ─── 首次加载 ─────────────────────────────
 
   useEffect(() => {
-    loadWatchlist().then(setList);
+    setList(loadWatchlist());
   }, []);
 
   // ─── 添加自选股 ──────────────────────────
@@ -94,7 +99,7 @@ const Watchlist: React.FC = () => {
 
     const newList = [...list, newItem];
     setList(newList);
-    await saveWatchlist(newList);
+    saveWatchlist(newList);
     setAddInput('');
   }, [addInput, list]);
 
@@ -104,7 +109,7 @@ const Watchlist: React.FC = () => {
     async (code: string) => {
       const newList = list.filter((item) => item.code !== code);
       setList(newList);
-      await saveWatchlist(newList);
+      saveWatchlist(newList);
     },
     [list],
   );
@@ -119,22 +124,12 @@ const Watchlist: React.FC = () => {
       setError(null);
 
       try {
-        const response = await sendMessage({
-          type: 'ANALYZE_POOL',
-          payload: { stocks: [`${item.name} ${item.code}`] },
+        const result = await analysisEngine.analyzePool({
+          stocks: [item.code],
         });
-
-        if (response?.success && response.data) {
-          if (typeof response.data === 'object' && 'marketEnv' in (response.data as any)) {
-            useAppStore.getState().setAnalysisResult(response.data as any);
-          } else {
-            setStatus('success');
-          }
-        } else {
-          setError(response?.error ?? '分析请求失败');
-        }
+        useAppStore.getState().setAnalysisResult(result);
       } catch (err) {
-        setError(err instanceof Error ? err.message : '分析请求发送失败');
+        setError(err instanceof Error ? err.message : '分析请求失败');
       } finally {
         setCurrentAction('none');
       }

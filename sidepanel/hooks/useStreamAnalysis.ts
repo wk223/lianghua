@@ -1,8 +1,6 @@
 /**
- * 流式分析 Hook (Electron 版)
- * 通过 Electron IPC 接收流式分析事件
- *
- * 替换 chrome.runtime.connect 为 Electron IPC (ipcRenderer.on 'stream:event')
+ * 流式分析 Hook (Web 版)
+ * 直接调用 AnalysisEngine，无需 Electron IPC
  *
  * @module sidepanel/hooks/useStreamAnalysis
  */
@@ -17,7 +15,7 @@ import type {
   DirectionResult,
 } from '../../utils/types';
 import { useAppStore, type StockResult } from '../stores/useAppStore';
-import { onStreamEvent, startStream } from '../../src/shared/ipc-bridge';
+import { analysisEngine } from '../../engine';
 
 // ═══════════════════════════════════════════════════════════════
 // 钩子
@@ -27,16 +25,14 @@ export function useStreamAnalysis() {
   const store = useAppStore();
   const [streamingText, setStreamingText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
-  const unsubscribeRef = useRef<(() => void) | null>(null);
-  const resolveRef = useRef<((value: void | PromiseLike<void>) => void) | null>(null);
-  const rejectRef = useRef<((reason?: unknown) => void) | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  // 组件卸载时清理监听
+  // 组件卸载时中止进行中的分析
   useEffect(() => {
     return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
       }
     };
   }, []);
@@ -44,7 +40,7 @@ export function useStreamAnalysis() {
   /**
    * 开始流式分析
    *
-   * @param type  - 消息类型 (ANALYZE_POOL_STREAM | ANALYZE_SINGLE_STREAM)
+   * @param type  - 分析类型
    * @param payload - 请求参数
    */
   const startStreamAnalysis = useCallback(
@@ -52,114 +48,67 @@ export function useStreamAnalysis() {
       type: 'ANALYZE_POOL_STREAM' | 'ANALYZE_SINGLE_STREAM',
       payload: unknown,
     ): Promise<void> => {
-      // 清理旧监听
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
+      // 中止前一次请求
+      if (abortRef.current) {
+        abortRef.current.abort();
       }
+      abortRef.current = new AbortController();
+      const signal = abortRef.current.signal;
 
       setIsStreaming(true);
       setStreamingText('');
       store.clearResults();
       store.setStatus('loading');
 
-      return new Promise<void>((resolve, reject) => {
-        resolveRef.current = resolve;
-        rejectRef.current = reject;
+      try {
+        let result: AnalysisResult;
 
-        // 注册流式事件监听
-        unsubscribeRef.current = onStreamEvent((event: StreamEvent) => {
-          try {
-            switch (event.event) {
-              // ── LLM 流式文本 ──
-              case 'stream:chunk': {
-                const chunk = event.data as string;
-                setStreamingText((prev) => prev + chunk);
-                break;
-              }
-
-              // ── 进度更新 ──
-              case 'stream:progress': {
-                const progress = event.data as StreamProgress;
-                store.setCurrentAction('analyze');
-                break;
-              }
-
-              // ── L1 环境评级结果 ──
-              case 'stream:env-level': {
-                const env = event.data as MarketEnvResult;
-                store.setEnvResult(env.envLevel, env.sentiment, env.suggestion);
-                break;
-              }
-
-              // ── L2 方向结果 ──
-              case 'stream:directions': {
-                const dirData = event.data as DirectionResult[];
-                if (Array.isArray(dirData)) {
-                  store.setDirections(dirData);
-                } else if (event.data && typeof event.data === 'object') {
-                  store.appendDirection(event.data as DirectionResult);
+        if (type === 'ANALYZE_POOL_STREAM') {
+          const { stocks } = payload as { stocks: string[] };
+          result = await analysisEngine.analyzePool({
+            stocks,
+            signal,
+            streamCallbacks: {
+              onChunk: (chunk) => {
+                const content = chunk.choices?.[0]?.delta?.content ?? '';
+                if (content) {
+                  setStreamingText((prev) => prev + content);
                 }
-                break;
-              }
-
-              // ── 单只股票结论增量 ──
-              case 'stream:conclusion': {
-                const conclusion = event.data as StreamConclusionData;
-                const stockResult: StockResult = {
-                  code: conclusion.stockCode,
-                  name: conclusion.stockName,
-                  verdict: conclusion.verdict,
-                  reason: conclusion.reason,
-                  riskPoints: conclusion.riskPoints,
-                  priority: conclusion.priority,
-                };
-                const current = useAppStore.getState().stockResults;
-                useAppStore.getState().setStockResults([
-                  ...current,
-                  stockResult,
-                ]);
-                break;
-              }
-
-              // ── 分析完成 ──
-              case 'stream:done': {
-                const result = event.data as AnalysisResult;
-                if (result) {
-                  store.setAnalysisResult(result);
-                } else {
-                  store.setStatus('success');
+              },
+            },
+          });
+        } else {
+          const { code } = payload as { code?: string; stock?: string };
+          result = await analysisEngine.analyzeSingle({
+            code: code ?? (payload as any).stock ?? '',
+            signal,
+            streamCallbacks: {
+              onChunk: (chunk) => {
+                const content = chunk.choices?.[0]?.delta?.content ?? '';
+                if (content) {
+                  setStreamingText((prev) => prev + content);
                 }
-                setIsStreaming(false);
-                setStreamingText('');
-                resolve();
-                break;
-              }
+              },
+            },
+          });
+        }
 
-              // ── 错误 ──
-              case 'stream:error': {
-                const errMsg =
-                  typeof event.data === 'string'
-                    ? event.data
-                    : '流式分析错误';
-                store.setError(errMsg);
-                setIsStreaming(false);
-                setStreamingText('');
-                reject(new Error(errMsg));
-                break;
-              }
+        // 检查是否被中止
+        if (signal.aborted) return;
 
-              default:
-                break;
-            }
-          } catch (err) {
-            console.error('[useStreamAnalysis] 事件处理错误:', err);
-          }
-        });
+        // 设置结果
+        store.setAnalysisResult(result);
+        setIsStreaming(false);
+        setStreamingText('');
 
-        // 发送请求启动流式分析
-        startStream(type, payload);
-      });
+      } catch (err: unknown) {
+        if (signal.aborted) return;
+
+        const errMsg = err instanceof Error ? err.message : String(err);
+        store.setError(errMsg);
+        setIsStreaming(false);
+        setStreamingText('');
+      }
     },
     [store],
   );
@@ -168,9 +117,9 @@ export function useStreamAnalysis() {
    * 中止流式分析
    */
   const abortStream = useCallback(() => {
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current();
-      unsubscribeRef.current = null;
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
     }
     setIsStreaming(false);
     store.setStatus('idle');
