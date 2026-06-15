@@ -19,6 +19,7 @@ import ErrorState from './components/ErrorState';
 import SettingsPanel from './components/SettingsPanel';
 import Watchlist from './components/Watchlist';
 import HistoryPanel from './components/HistoryPanel';
+import DailyPicks from './components/DailyPicks';
 
 const App: React.FC = () => {
   const {
@@ -30,6 +31,8 @@ const App: React.FC = () => {
     autoPolling,
     lastPollTime,
     hasApiKey,
+    dailyPicksResult,
+    dailyPicksLoading,
   } = useAppStore();
 
   const { startPolling, stopPolling, togglePolling, isPolling } = useAutoPolling();
@@ -157,6 +160,8 @@ const App: React.FC = () => {
         <StockInput />
         <QuickActions />
         <Watchlist />
+
+        {(dailyPicksResult || dailyPicksLoading) && <DailyPicks />}
 
         {status === 'error' && <ErrorState />}
         {renderContent()}

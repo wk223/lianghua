@@ -262,6 +262,49 @@ export interface ConclusionResult {
 /**
  * 比较模式结果
  */
+/**
+ * 「今天买什么」结果类型
+ *
+ * 由 LLM 基于大盘环境 + 板块排名 + 领涨股分析得出
+ * 用于 DailyPicks 组件展示
+ */
+export interface DailyPickStock {
+  /** 股票名称 */
+  name: string;
+  /** 股票代码 */
+  code: string;
+  /** 推荐理由 */
+  reason: string;
+  /** 建议买入方式/点位说明 */
+  entryPoint: string;
+  /** 风险提示 (1-2条) */
+  riskPoints: string[];
+}
+
+export interface DailyPickSector {
+  /** 板块名称 */
+  name: string;
+  /** 逻辑强度 强/中/弱 */
+  logicStrength: LogicStrength;
+  /** 推荐理由 */
+  reason: string;
+  /** 该板块推荐的个股 */
+  stocks: DailyPickStock[];
+}
+
+export interface DailyPicksResult {
+  /** 大盘环境概括 */
+  envSummary: string;
+  /** 环境级别 (S/A/B/C/D) */
+  envLevel: EnvLevel;
+  /** 总体操作建议 */
+  overallSuggestion: string;
+  /** 推荐板块列表 */
+  sectors: DailyPickSector[];
+  /** 生成时间戳 */
+  createdAt: number;
+}
+
 export interface CompareResult {
   exists: boolean;
   /** 胜出者 */

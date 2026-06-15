@@ -20,6 +20,7 @@ import type {
   Verdict,
   CompareResult,
   StockAnalysisResult,
+  DailyPicksResult,
 } from '../../utils/types';
 
 // ─── 状态类型 ──────────────────────────────────────────
@@ -40,7 +41,7 @@ export interface StockResult {
   priority: number;
 }
 
-export type ActionType = 'none' | 'env-check' | 'analyze' | 'compare';
+export type ActionType = 'none' | 'env-check' | 'analyze' | 'compare' | 'daily-picks';
 
 export interface HistoryRecord {
   id: string;
@@ -87,6 +88,10 @@ interface AppState {
   // 历史记录
   history: HistoryRecord[];
   historyOpen: boolean;
+
+  // 今天买什么
+  dailyPicksResult: DailyPicksResult | null;
+  dailyPicksLoading: boolean;
 
   // 自动轮询
   autoPolling: boolean;
@@ -136,6 +141,10 @@ interface AppState {
   setHistoryOpen: (open: boolean) => void;
   toggleHistory: () => void;
 
+  // 今天买什么
+  setDailyPicksResult: (result: DailyPicksResult | null) => void;
+  setDailyPicksLoading: (loading: boolean) => void;
+
   // 自动轮询
   setAutoPolling: (polling: boolean) => void;
   setLastPollTime: (time: number | null) => void;
@@ -170,6 +179,8 @@ const initialStates: Pick<
   | 'settingsOpen'
   | 'history'
   | 'historyOpen'
+  | 'dailyPicksResult'
+  | 'dailyPicksLoading'
   | 'autoPolling'
   | 'lastPollTime'
 > = {
@@ -198,6 +209,8 @@ const initialStates: Pick<
   settingsOpen: false,
   history: [],
   historyOpen: false,
+  dailyPicksResult: null,
+  dailyPicksLoading: false,
   autoPolling: false,
   lastPollTime: null,
 };
@@ -284,6 +297,8 @@ export const useAppStore = create<AppState>((set) => ({
       currentAction: 'none',
       streamingText: '',
       isStreaming: false,
+      dailyPicksResult: null,
+      dailyPicksLoading: false,
     }),
 
   reset: () => set({ ...initialStates }),
@@ -305,6 +320,10 @@ export const useAppStore = create<AppState>((set) => ({
   clearHistory: () => set({ history: [] }),
   setHistoryOpen: (open: boolean) => set({ historyOpen: open }),
   toggleHistory: () => set((state) => ({ historyOpen: !state.historyOpen })),
+
+  // 今天买什么
+  setDailyPicksResult: (result: DailyPicksResult | null) => set({ dailyPicksResult: result }),
+  setDailyPicksLoading: (loading: boolean) => set({ dailyPicksLoading: loading }),
 
   // 自动轮询
   setAutoPolling: (polling: boolean) => set({ autoPolling: polling }),
