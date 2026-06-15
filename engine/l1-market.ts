@@ -3,25 +3,32 @@
  * 分析大盘指数、情绪强弱、赚钱效应 → 输出环境级别 + 仓位建议
  *
  * 职责:
- *   1. 接收 MarketIndex[] + SectorData[] 等市场数据
+ *   1. 接收 MarketIndex[] + SectorData[] + SentimentData 等市场数据
  *   2. 计算关键指标:
  *      - 指数趋势方向 & 强度
  *      - 涨跌家数比（通过板块综合数据估算）
  *      - 成交量能变化
  *      - 板块效应强度（上涨板块占比 + 领涨板块涨幅）
+ *      - 舆情/快讯情绪（基于财联社电报关键词分析）
  *   3. 输出 MarketEnvResult
  *
  * 评级标准:
- *   S = 极强: 指数共振向上 + 成交量放大 + 板块普涨 + 赚钱效应好
- *   A = 强势: 指数上涨 + 量能配合 + 有主线板块 + 赚钱效应正常
- *   B = 中性: 指数震荡 + 量能持平 + 板块分化 + 赚钱效应一般
- *   C = 弱势: 指数下跌 + 缩量 + 板块普跌 + 亏钱效应明显
- *   D = 极弱: 指数暴跌 + 放量下跌 + 恐慌情绪 + 系统性风险
+ *   S = 极强: 指数共振向上 + 成交量放大 + 板块普涨 + 赚钱效应好 + 舆情乐观
+ *   A = 强势: 指数上涨 + 量能配合 + 有主线板块 + 赚钱效应正常 + 情绪偏多
+ *   B = 中性: 指数震荡 + 量能持平 + 板块分化 + 赚钱效应一般 + 情绪中性
+ *   C = 弱势: 指数下跌 + 缩量 + 板块普跌 + 亏钱效应明显 + 情绪偏空
+ *   D = 极弱: 指数暴跌 + 放量下跌 + 恐慌情绪 + 系统性风险 + 舆论悲观
  *
  * @module engine/l1-market
  */
 
-import type { MarketEnvResult, MarketIndex, SectorData, EnvLevel } from '../utils/types';
+import type {
+  MarketEnvResult,
+  MarketIndex,
+  SectorData,
+  EnvLevel,
+  SentimentData,
+} from '../utils/types';
 import { logger } from '../utils/logger';
 
 // ═══════════════════════════════════════════════════════════════
@@ -29,10 +36,11 @@ import { logger } from '../utils/logger';
 // ═══════════════════════════════════════════════════════════════
 
 const WEIGHTS = {
-  INDEX_TREND: 0.35,     // 指数趋势权重
-  SECTOR_EFFECT: 0.25,   // 板块效应权重
-  VOLUME: 0.20,          // 成交量能权重
-  MARKET_BREADTH: 0.20,  // 市场宽度（涨跌家数等）
+  INDEX_TREND: 0.30,       // 指数趋势权重
+  SECTOR_EFFECT: 0.22,     // 板块效应权重
+  VOLUME: 0.18,            // 成交量能权重
+  MARKET_BREADTH: 0.18,    // 市场宽度（涨跌家数等）
+  FLASH_SENTIMENT: 0.12,   // 舆情/快讯情绪权重（财联社 data）
 } as const;
 
 /** 每项满分 100 分 */
@@ -46,14 +54,16 @@ export class L1MarketAnalyzer {
   /**
    * 全量分析市场环境
    *
-   * @param indices  - 大盘指数列表（上证/深证/创业板/科创50）
-   * @param sectors  - 板块行情列表（用于判断板块效应）
+   * @param indices     - 大盘指数列表（上证/深证/创业板/科创50）
+   * @param sectors     - 板块行情列表（用于判断板块效应）
+   * @param sentiment   - 舆情情绪数据（基于财联社快讯，可选）
    * @param prevIndices - 前一日指数数据（用于判断趋势变化，可选）
    * @returns MarketEnvResult
    */
   async analyze(
     indices: MarketIndex[],
     sectors: SectorData[],
+    sentiment?: SentimentData,
     prevIndices?: MarketIndex[],
   ): Promise<MarketEnvResult> {
     if (indices.length === 0) {
@@ -70,29 +80,35 @@ export class L1MarketAnalyzer {
     const sectorScore = this.scoreSectorEffect(sectors);
     const volumeScore = this.scoreVolume(indices);
     const breadthScore = this.scoreMarketBreadth(indices, sectors);
+    const flashScore = sentiment
+      ? this.scoreFlashSentiment(sentiment)
+      : 50; // 无舆情数据时默认中性
 
     // 加权总分
     const totalScore =
       indexScore * WEIGHTS.INDEX_TREND +
       sectorScore * WEIGHTS.SECTOR_EFFECT +
       volumeScore * WEIGHTS.VOLUME +
-      breadthScore * WEIGHTS.MARKET_BREADTH;
+      breadthScore * WEIGHTS.MARKET_BREADTH +
+      flashScore * WEIGHTS.FLASH_SENTIMENT;
 
     // 评级 & 建议
     const envLevel = this.scoreToLevel(totalScore);
-    const sentiment = this.describeSentiment(indices, envLevel);
-    const suggestion = this.getSuggestion(envLevel, totalScore, indices);
+    const sentimentDesc = this.describeSentiment(indices, envLevel, sentiment);
+    const suggestion = this.getSuggestion(envLevel, totalScore, indices, sentiment);
 
     logger.debug('[L1] 环境评分结果:', {
       indexScore: indexScore.toFixed(1),
       sectorScore: sectorScore.toFixed(1),
       volumeScore: volumeScore.toFixed(1),
       breadthScore: breadthScore.toFixed(1),
+      flashScore: flashScore.toFixed(1),
       totalScore: totalScore.toFixed(1),
       envLevel,
+      sentimentLabel: sentiment?.label ?? '无数据',
     });
 
-    return { envLevel, sentiment, suggestion };
+    return { envLevel, sentiment: sentimentDesc, suggestion };
   }
 
   /**
@@ -183,16 +199,7 @@ export class L1MarketAnalyzer {
   private scoreVolume(indices: MarketIndex[]): number {
     if (indices.length === 0) return 50;
 
-    // 用上证和深证的数据判断
-    const shIdx = indices.find(
-      (i) => i.code === '000001' || i.name.includes('上证'),
-    );
-    const szIdx = indices.find(
-      (i) => i.code === '399001' || i.name.includes('深证'),
-    );
-
     // 基于涨跌幅推断成交量配合
-    // 这里简化处理：指数上涨且量能合理 = 积极
     const avgChange = this.averageChange(indices);
 
     if (avgChange > 1) return 70; // 上涨放量
@@ -240,6 +247,41 @@ export class L1MarketAnalyzer {
     return Math.max(0, Math.min(100, ratioScore * 0.7 + breadthBonus));
   }
 
+  /**
+   * 舆情/快讯情绪评分 (0-100)
+   *
+   * 基于财联社快讯的语义分析得分，映射到 0~100 分:
+   *   Sentiment score -100 ~ 100 → 0 ~ 100
+   *
+   * 额外考量:
+   * - 重要快讯占比越高，信号可信度越高
+   * - 政策利好/利空信号数量影响信心
+   */
+  private scoreFlashSentiment(sentiment: SentimentData): number {
+    // 基准: sentiment.score 范围 -100 ~ 100
+    // 映射到 0 ~ 100: score=100 → 100, score=-100 → 0, score=0 → 50
+    let baseScore = 50 + (sentiment.score / 100) * 50;
+    baseScore = Math.max(0, Math.min(100, baseScore));
+
+    // 快讯数量信心加成: 快讯越多，信号越可靠
+    const confidenceBonus = Math.min(10, sentiment.flashCount / 5);
+
+    // 重要快讯比例加分
+    const importantRatio =
+      sentiment.flashCount > 0
+        ? sentiment.importantCount / sentiment.flashCount
+        : 0;
+    const importantBonus = importantRatio * 10;
+
+    // 政策信号加分（更多政策利好 → 积极）
+    const policyBonus = Math.min(5, sentiment.policyCues.length * 1);
+    const riskPenalty = Math.min(5, sentiment.riskCues.length * 1);
+
+    let finalScore = baseScore + confidenceBonus + importantBonus + policyBonus - riskPenalty;
+
+    return Math.max(0, Math.min(100, Math.round(finalScore)));
+  }
+
   // ─── 辅助方法 ──────────────────────────────────────
 
   /** 计算指数平均涨跌幅 */
@@ -257,13 +299,34 @@ export class L1MarketAnalyzer {
     return 'D';
   }
 
-  /** 生成情绪描述 */
+  /** 生成情绪描述（结合指数数据 + 舆情情绪） */
   private describeSentiment(
     indices: MarketIndex[],
     level: EnvLevel,
+    sentiment?: SentimentData,
   ): string {
     const avgChange = this.averageChange(indices);
 
+    // 如果有舆情数据，优先使用舆情标签
+    if (sentiment && sentiment.flashCount > 0) {
+      const flashPart = sentiment.label;
+      const topicPart =
+        sentiment.hotTopics.length > 0
+          ? `热点: ${sentiment.hotTopics.slice(0, 3).join('/')}`
+          : '';
+      const policyPart =
+        sentiment.policyCues.length > 0
+          ? `政策: ${sentiment.policyCues.slice(0, 3).join('/')}`
+          : '';
+
+      const parts = [flashPart];
+      if (topicPart) parts.push(topicPart);
+      if (policyPart) parts.push(policyPart);
+
+      return parts.join(' | ');
+    }
+
+    // 无舆情数据时，基于指数数据推断
     const sentimentMap: Record<EnvLevel, string[]> = {
       S: ['情绪亢奋', '赚钱效应强', '市场全面活跃'],
       A: ['情绪偏多', '赚钱效应较好', '市场健康'],
@@ -273,33 +336,86 @@ export class L1MarketAnalyzer {
     };
 
     const options = sentimentMap[level];
-    // 根据涨跌幅选择合适的描述
     if (avgChange > 2) return options[0];
     if (avgChange > 0.5) return options[1];
     return options[2];
   }
 
-  /** 获取仓位/风格建议 */
+  /** 获取仓位/风格建议（结合舆情情绪调整） */
   private getSuggestion(
     level: EnvLevel,
     score: number,
     indices: MarketIndex[],
+    sentiment?: SentimentData,
   ): string {
     const avgChange = this.averageChange(indices);
 
+    // 根据舆情情绪调整建议
+    const sentimentAdjustment = sentiment
+      ? this.sentimentAdjustment(sentiment)
+      : '';
+
+    let base: string;
+
     switch (level) {
       case 'S':
-        return avgChange > 2
-          ? '可积极做多，仓位 7-8 成，追涨需谨慎'
-          : '可适当加仓，仓位 5-7 成，围绕主线操作';
+        base =
+          avgChange > 2
+            ? '可积极做多，仓位 7-8 成，追涨需谨慎'
+            : '可适当加仓，仓位 5-7 成，围绕主线操作';
+        break;
       case 'A':
-        return '仓位 4-6 成，聚焦主线，避免追高';
+        base = '仓位 4-6 成，聚焦主线，避免追高';
+        break;
       case 'B':
-        return '仓位 3-5 成，谨慎操作，快进快出';
+        base = '仓位 3-5 成，谨慎操作，快进快出';
+        break;
       case 'C':
-        return '仓位 1-3 成，防守为主，仅做核心龙头';
+        base = '仓位 1-3 成，防守为主，仅做核心龙头';
+        break;
       case 'D':
-        return '空仓或极轻仓，不建议开新仓';
+        base = '空仓或极轻仓，不建议开新仓';
+        break;
     }
+
+    if (sentimentAdjustment) {
+      return `${base}。${sentimentAdjustment}`;
+    }
+    return base;
+  }
+
+  /**
+   * 基于舆情情绪生成额外的操作提示
+   */
+  private sentimentAdjustment(sentiment: SentimentData): string {
+    const tips: string[] = [];
+
+    // 政策信号提示
+    if (sentiment.policyCues.length >= 3) {
+      tips.push('政策利好密集释放，关注受益板块');
+    } else if (sentiment.policyCues.length >= 1) {
+      tips.push('政策面偏积极');
+    }
+
+    // 风险信号提示
+    if (sentiment.riskCues.length >= 3) {
+      tips.push('注意利空因素累积风险');
+    } else if (sentiment.riskCues.length >= 1) {
+      tips.push('关注提示的利空因素');
+    }
+
+    // 情绪极端提示
+    if (sentiment.score <= -60) {
+      tips.push('舆情极度悲观，警惕短期超跌反弹机会');
+    } else if (sentiment.score >= 60) {
+      tips.push('情绪过于亢奋，注意回调风险');
+    }
+
+    // 热点提示
+    if (sentiment.hotTopics.length > 0) {
+      tips.push(`舆情热点: ${sentiment.hotTopics.slice(0, 3).join('/')}`);
+    }
+
+    return tips.join('；');
   }
 }

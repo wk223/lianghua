@@ -202,3 +202,87 @@ export interface AnalysisResult {
   conclusions: ConclusionResult[];
   timestamp: number;
 }
+
+// ─── 财联社 (cls.cn) ─────────────────────────────────
+
+/** 财联社快讯/电报 (已解析为干净的领域模型) */
+export interface FlashNews {
+  id: number;
+  /** 标题（部分快讯无标题） */
+  title: string;
+  /** 正文纯文本（已清洗 HTML） */
+  content: string;
+  /** 发布时间 "2025-01-15 09:32:00" */
+  time: string;
+  /** 来源 */
+  source: string;
+  /** 是否重要（加红/置顶） */
+  isImportant: boolean;
+  /** 关联股票代码列表 ["600519","000858"] */
+  stocks: string[];
+  /** 分类标签 */
+  category: string;
+}
+
+/** 财联社公告 (领域模型) */
+export interface Announcement {
+  id: number;
+  title: string;
+  summary: string;
+  /** 关联股票代码 */
+  stockCode: string;
+  /** 关联股票名称 */
+  stockName: string;
+  /** 发布时间 */
+  time: string;
+  /** 公告分类 */
+  type: string;
+  /** 原文链接 */
+  url: string;
+}
+
+/** 财联社热门题材 (领域模型) */
+export interface ClsTopic {
+  id: number;
+  name: string;
+  hotValue: number;
+  stockCount: number;
+  changePercent: number;
+  description: string;
+  leadStock: string;
+  leadChange: number;
+}
+
+/**
+ * 舆情情绪快照
+ *
+ * 由 CLS 快讯聚合分析得出，用于 L1 环境判断中的情绪维度
+ */
+export interface SentimentData {
+  /** 综合情绪分数 -100 ~ 100 */
+  score: number;
+  /** 情绪标签 */
+  label: SentimentLabel;
+  /** 热点话题列表 */
+  hotTopics: string[];
+  /** 政策催化信号 */
+  policyCues: string[];
+  /** 风险/利空信号 */
+  riskCues: string[];
+  /** 统计的快讯总数 */
+  flashCount: number;
+  /** 重要快讯数 */
+  importantCount: number;
+  /** 分析时间戳 */
+  analyzedAt: number;
+}
+
+/** 情绪标签 */
+export type SentimentLabel =
+  | '极度乐观'
+  | '乐观'
+  | '偏多'
+  | '中性'
+  | '偏空'
+  | '悲观'
+  | '极度悲观';

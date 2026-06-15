@@ -71,16 +71,28 @@ export const CACHE_KEYS = {
   HOT_TOPICS: 'hot_topics',
   /** 分析结果 */
   ANALYSIS: 'analysis',
+  /** 财联社快讯 */
+  CLS_FLASH: 'cls_flash',
+  /** 财联社公告 */
+  CLS_ANNOUNCEMENT: 'cls_announcement',
+  /** 财联社热门题材 */
+  CLS_TOPIC: 'cls_topic',
+  /** 财联社情绪分析 */
+  CLS_SENTIMENT: 'cls_sentiment',
 } as const;
 
 /** 各类型缓存的默认 TTL (ms) */
 export const CACHE_TTL = {
-  [CACHE_KEYS.QUOTE]:          { t1: 10_000, t2: 30_000 },
-  [CACHE_KEYS.MARKET_INDEX]:   { t1: 15_000, t2: 45_000 },
-  [CACHE_KEYS.SECTORS]:        { t1: 15_000, t2: 60_000 },
-  [CACHE_KEYS.SECTOR_DETAIL]:  { t1: 15_000, t2: 60_000 },
-  [CACHE_KEYS.HOT_TOPICS]:     { t1: 15_000, t2: 60_000 },
-  [CACHE_KEYS.ANALYSIS]:       { t1: 60_000, t2: 300_000 },
+  [CACHE_KEYS.QUOTE]:            { t1: 10_000, t2: 30_000 },
+  [CACHE_KEYS.MARKET_INDEX]:     { t1: 15_000, t2: 45_000 },
+  [CACHE_KEYS.SECTORS]:          { t1: 15_000, t2: 60_000 },
+  [CACHE_KEYS.SECTOR_DETAIL]:    { t1: 15_000, t2: 60_000 },
+  [CACHE_KEYS.HOT_TOPICS]:       { t1: 15_000, t2: 60_000 },
+  [CACHE_KEYS.ANALYSIS]:         { t1: 60_000, t2: 300_000 },
+  [CACHE_KEYS.CLS_FLASH]:        { t1: 8_000,  t2: 20_000 },
+  [CACHE_KEYS.CLS_ANNOUNCEMENT]: { t1: 60_000, t2: 120_000 },
+  [CACHE_KEYS.CLS_TOPIC]:        { t1: 30_000, t2: 60_000 },
+  [CACHE_KEYS.CLS_SENTIMENT]:    { t1: 15_000, t2: 30_000 },
 } as const;
 
 // ═══════════════════════════════════════════════════════════════

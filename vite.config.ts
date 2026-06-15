@@ -28,6 +28,18 @@ export default defineConfig({
         },
         rewrite: (path) => path.replace(/^\/api\/ths_q/, ''),
       },
+      // 财联社 API — 实时电报/快讯/公告
+      '/api/cls': {
+        target: 'https://www.cls.cn',
+        changeOrigin: true,
+        secure: false,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://www.cls.cn/',
+          'Origin': 'https://www.cls.cn',
+        },
+        rewrite: (path) => path.replace(/^\/api\/cls/, ''),
+      },
     },
   },
   build: {

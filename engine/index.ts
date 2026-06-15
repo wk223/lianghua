@@ -29,6 +29,7 @@ import { L4ConclusionEngine } from './l4-conclusion';
 import { PromptBuilder } from '../prompts/builders';
 import { DeepSeekClient } from '../llm/client';
 import { ThsAdapter } from '../data/ths';
+import { ClsAdapter } from '../data/cls';
 import { CacheManager, cacheManager } from '../data/cache';
 
 import type {
@@ -42,6 +43,7 @@ import type {
   DirectionResult,
   StockAnalysisResult,
   EnvLevel,
+  SentimentData,
 } from '../utils/types';
 
 import type { StreamCallbacks, StreamResult } from '../llm/types';
@@ -114,6 +116,7 @@ export class AnalysisEngine {
   private conclusionEngine: L4ConclusionEngine;
   private promptBuilder: PromptBuilder;
   private dataSource: ThsAdapter;
+  private clsAdapter: ClsAdapter;
   private llmClient: DeepSeekClient;
   private cache: CacheManager;
 
@@ -126,6 +129,7 @@ export class AnalysisEngine {
       conclusionEngine?: L4ConclusionEngine;
       promptBuilder?: PromptBuilder;
       dataSource?: ThsAdapter;
+      clsAdapter?: ClsAdapter;
       llmClient?: DeepSeekClient;
       cache?: CacheManager;
     },
@@ -137,6 +141,7 @@ export class AnalysisEngine {
     this.conclusionEngine = deps?.conclusionEngine ?? new L4ConclusionEngine();
     this.promptBuilder = deps?.promptBuilder ?? new PromptBuilder();
     this.dataSource = deps?.dataSource ?? new ThsAdapter();
+    this.clsAdapter = deps?.clsAdapter ?? new ClsAdapter();
     this.llmClient = deps?.llmClient ?? new DeepSeekClient();
     this.cache = deps?.cache ?? cacheManager;
   }
@@ -176,8 +181,12 @@ export class AnalysisEngine {
     const marketData = await this.fetchMarketData(forceRefresh);
     signal?.throwIfAborted();
 
-    // ═══ Step 2: L1 — 市场环境 ═══
-    const envResult = await this.runL1(marketData.indices, marketData.sectors);
+    // ═══ Step 2: L1 — 市场环境（含舆情情绪评分） ═══
+    const envResult = await this.runL1(
+      marketData.indices,
+      marketData.sectors,
+      marketData.sentiment,
+    );
     signal?.throwIfAborted();
 
     // ═══ Step 3: L2 — 方向判断 ═══
@@ -235,19 +244,25 @@ export class AnalysisEngine {
     indices: MarketIndex[];
     sectors: SectorData[];
     topics: HotTopic[];
+    sentiment: SentimentData | null;
   }> {
     logger.info('[Engine] 环境诊断');
 
     const marketData = await this.fetchMarketData(options?.forceRefresh);
     options?.signal?.throwIfAborted();
 
-    const envResult = await this.runL1(marketData.indices, marketData.sectors);
+    const envResult = await this.runL1(
+      marketData.indices,
+      marketData.sectors,
+      marketData.sentiment,
+    );
 
     return {
       ...envResult,
       indices: marketData.indices,
       sectors: marketData.sectors,
       topics: marketData.topics,
+      sentiment: marketData.sentiment,
     };
   }
 
@@ -279,7 +294,7 @@ export class AnalysisEngine {
 
     // L1 + L2
     const [envResult, directions] = await Promise.all([
-      this.runL1(marketData.indices, marketData.sectors),
+      this.runL1(marketData.indices, marketData.sectors, marketData.sentiment),
       this.runL2(marketData.sectors, marketData.topics),
     ]);
     signal?.throwIfAborted();
@@ -327,19 +342,25 @@ export class AnalysisEngine {
     sectors: SectorData[];
     topics: HotTopic[];
     quotes: StockQuote[];
+    sentiment: SentimentData | null;
   }> {
     const cacheOpts = forceRefresh ? { useCache: false } : { useCache: this.config.useCache };
 
-    const [indices, sectors, topics] = await Promise.all([
+    const [indices, sectors, topics, sentiment] = await Promise.all([
       this.dataSource.getMarketIndex(cacheOpts),
       this.dataSource.getSectors(cacheOpts),
       this.dataSource.getHotTopics(cacheOpts),
+      this.clsAdapter.getSentiment(cacheOpts).catch((err) => {
+        logger.warn('[Engine] CLS 情绪数据获取失败，跳过:', (err as Error).message);
+        return null;
+      }),
     ]);
 
     return {
       indices,
       sectors,
       topics,
+      sentiment,
       quotes: [], // 个股行情在 L3 阶段按需获取
     };
   }
@@ -371,12 +392,13 @@ export class AnalysisEngine {
   // 引擎层执行
   // ═════════════════════════════════════════════════════════════
 
-  /** L1: 市场环境 */
+  /** L1: 市场环境（含舆情情绪） */
   private async runL1(
     indices: MarketIndex[],
     sectors: SectorData[],
+    sentiment?: SentimentData | null,
   ): Promise<MarketEnvResult> {
-    return this.marketAnalyzer.analyze(indices, sectors);
+    return this.marketAnalyzer.analyze(indices, sectors, sentiment ?? undefined);
   }
 
   /** L2: 方向判断 */

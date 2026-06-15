@@ -106,3 +106,142 @@ export interface FetcherStats {
   failedRequests: number;
   rateLimited: number;
 }
+
+// ─── 财联社 (cls.cn) API 原始响应 ────────────────────
+
+/**
+ * 财联社 sw API 统一响应外层
+ *
+ * POST https://www.cls.cn/api/sw?app=CailianpressWeb&os=web&sv=8.4.6
+ *
+ * 所有接口共用同一包裹格式:
+ * {
+ *   "code": 0,            // 0=成功
+ *   "data": { ... },      // 具体数据
+ *   "message": "success"
+ * }
+ */
+export interface ClsApiEnvelope<T> {
+  code: number;
+  data: T;
+  message?: string;
+}
+
+/**
+ * 财联社快讯/电报列表响应 data 字段
+ *
+ * type="telegram" 时返回此结构
+ */
+export interface ClsRollData {
+  /** 快讯列表 */
+  roll_data: ClsFlashRawItem[];
+  /** 是否有更多 */
+  has_more: boolean;
+  /** 分页游标 */
+  cursor?: string;
+  /** 当前分类 */
+  category?: string;
+}
+
+/**
+ * 财联社单条快讯/电报原始数据
+ *
+ * 字段名使用蛇形 (snake_case)，保持与 API 原始响应一致
+ */
+export interface ClsFlashRawItem {
+  /** 唯一 ID */
+  id: number;
+  /** 标题（部分快讯无标题） */
+  title?: string;
+  /** 正文内容（HTML 格式可能包含富文本） */
+  content: string;
+  /** 创建时间 "2025-01-15 09:32:00" */
+  ctime: string;
+  /** 更新时间 */
+  updated_at?: string;
+  /** 来源（如"财联社"、"电报"） */
+  source?: string;
+  /** 是否重要 0=普通 1=重要 */
+  is_important?: number;
+  /** 关联股票代码，逗号分隔 "600519,000858" */
+  stock_codes?: string;
+  /** 关联股票名称，逗号分隔 */
+  stock_name?: string;
+  /** 分类标签 */
+  category?: string;
+  /** 阅读量 */
+  read_count?: number;
+}
+
+/**
+ * 财联社热门题材/概念 data 字段
+ *
+ * type="hot_topic" 时返回此结构
+ */
+export interface ClsTopicData {
+  list: ClsTopicRawItem[];
+}
+
+/**
+ * 财联社热门题材条目原始数据
+ */
+export interface ClsTopicRawItem {
+  id: number;
+  /** 题材名称 */
+  name: string;
+  /** 热度值 */
+  hot_value: number;
+  /** 相关股票数量 */
+  stock_count: number;
+  /** 今日涨幅 % */
+  change_percent: number;
+  /** 描述 */
+  desc?: string;
+  /** 领涨股 */
+  lead_stock?: string;
+  /** 领涨股涨幅 % */
+  lead_change?: number;
+}
+
+/**
+ * 财联社公告列表 data 字段
+ *
+ * type="announcement" 时返回此结构
+ */
+export interface ClsAnnouncementData {
+  list: ClsAnnouncementRawItem[];
+  has_more: boolean;
+  cursor?: string;
+}
+
+/**
+ * 财联社公告条目原始数据
+ */
+export interface ClsAnnouncementRawItem {
+  id: number;
+  /** 公告标题 */
+  title: string;
+  /** 公告摘要 */
+  summary?: string;
+  /** 关联股票代码 */
+  stock_code: string;
+  /** 关联股票名称 */
+  stock_name: string;
+  /** 发布时间 "2025-01-15 18:00:00" */
+  ctime: string;
+  /** 公告分类: 业绩预告/增减持/重组/分红/其他 */
+  type: string;
+  /** 公告原文 URL */
+  url?: string;
+}
+
+/**
+ * 财联社 API 请求类型枚举
+ */
+export type ClsApiType =
+  | 'telegram'        // 电报/快讯
+  | 'announcement'    // 公告
+  | 'hot_topic'       // 热门题材
+  | 'important_news'  // 重要新闻
+  | 'live'           // 直播
+  | 'roll';           // 滚动
